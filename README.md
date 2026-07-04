@@ -13,7 +13,7 @@
 ## Installation
 
 ```bash
-python -m pip install pydry
+python -m pip install pydry-cli
 ```
 
 For local development from a checkout:

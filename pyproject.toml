@@ -3,8 +3,8 @@ requires = ["setuptools>=77.0.3", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "pydry"
-version = "0.0.1"
+name = "pydry-cli"
+version = "0.0.2"
 description = "AST-based duplicate and structural similarity detector for Python"
 readme = "README.md"
 requires-python = ">=3.11"
