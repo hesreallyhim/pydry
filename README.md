@@ -1,6 +1,6 @@
 # pydry
 
-`pydry` is a small Python CLI for finding exact duplicate functions and structurally similar functions in Python code.
+`pydry` is a Python library for maintaining DRY code - it scans your repository looking for exact duplicate functions, nearly duplicate functions, and functions with varying degrees of strucural similarity. It can be used in CI to identify any new code that would violate DRYness, and it can also be used as a guide when refactoring, by highlighting code blocks that are similar enough to be good candidates for dedpulication.
 
 ## Features
 
@@ -8,8 +8,6 @@
 - Ranks near matches by structural similarity and refactorability.
 - Flags likely abstraction candidates and common risk signals.
 - Emits text output for quick inspection and JSON output for automation.
-- Enforces configurable duplication policy as a GitHub required check.
-- Runs without third-party runtime dependencies.
 
 ## Installation
 
@@ -54,7 +52,7 @@ pydry report ./src --output reports/pydry-report.json
 
 ## GitHub Actions
 
-Use pydry as a pull-request and merge-queue check with a read-only workflow:
+This repository also ships a GitHub Action so that you can easily incorporate `pydry` into your CI/CD workflows:
 
 ```yaml
 name: pydry
@@ -68,11 +66,11 @@ jobs:
     name: pydry
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: hesreallyhim/pydry@<40-character-release-commit-sha>
+      - uses: actions/checkout@v7
+      - uses: hesreallyhim/pydry@v0
 ```
 
-Pin the pydry action to a reviewed, immutable commit SHA, then configure the `pydry` job as a required status check. Policy lives in a standalone `pydry.toml`; action inputs can override individual settings. See the [GitHub Actions integration guide](docs/github-action.md) for configuration, outputs, permissions, merge queues, and CODEOWNERS guidance.
+Configure the `pydry` job as a required status check. Policy lives in a standalone `pydry.toml`; action inputs can override individual settings. See the [GitHub Actions integration guide](docs/github-action.md) for configuration, outputs, permissions, merge queues, and CODEOWNERS guidance.
 
 ## Commands
 
@@ -216,6 +214,10 @@ make check-dist
 ```
 
 The package supports Python 3.11 and newer.
+
+## Releases
+
+Release Please derives versions and changelog entries from Conventional Commit pull-request titles. See [the release guide](docs/releasing.md) for repository setup and the maintainer workflow.
 
 ## License
 

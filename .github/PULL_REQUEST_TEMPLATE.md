@@ -11,4 +11,4 @@ Brief description of what this PR does.
 - [ ] `make check` passes (lint, typecheck, test)
 - [ ] Tests added/updated for new behavior
 - [ ] Documentation updated if needed
-- [ ] Commit messages follow conventional commit format
+- [ ] PR title follows Conventional Commits (for example, `feat: add JSON output`)

@@ -24,11 +24,11 @@ make pre-commit
 
 ## Development Workflow
 
-1. Create a branch from `develop` for your change
+1. Create a branch from `main` for your change
 2. Make your changes
 3. Run the full check suite: `make check`
-4. Commit with a clear message (conventional commits preferred)
-5. Open a pull request against `develop`
+4. Write commit messages using the Conventional Commits format
+5. Open a pull request against `main` using a Conventional Commit title; with squash merging, the PR title becomes the commit Release Please reads
 
 ## Running Checks
 

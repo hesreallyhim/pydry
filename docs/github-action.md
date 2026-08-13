@@ -25,10 +25,10 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Check duplication policy
-        uses: hesreallyhim/pydry@<40-character-release-commit-sha>
+        uses: hesreallyhim/pydry@v0
 ```
 
-Replace `<40-character-release-commit-sha>` with the full commit SHA for the pydry release you have reviewed. A tag such as `v1` is convenient but mutable; pinning an immutable commit prevents an upstream tag change from silently changing code that runs in CI. Dependabot or Renovate can be used to propose reviewed pin updates.
+The checkout step makes the repository source available for pydry to scan.
 
 The `merge_group` trigger is necessary when the repository uses GitHub merge queues. Without it, the required pydry check will not run for the temporary merge-group commit. The workflow needs only `contents: read`; do not grant write permissions to this analysis job. Prefer `pull_request` to `pull_request_target`, especially for contributions from forks.
 
@@ -89,7 +89,7 @@ Every policy input is optional. A blank input defers to `pydry.toml`; a nonblank
 
 ```yaml
 - name: Check duplication policy
-  uses: hesreallyhim/pydry@<40-character-release-commit-sha>
+  uses: hesreallyhim/pydry@v0
   with:
     root: src
     config: config/pydry.toml
@@ -152,7 +152,7 @@ Exit status `0` means the policy passed, `1` means findings violated the configu
 - name: Run pydry for inspection
   id: pydry
   continue-on-error: true
-  uses: hesreallyhim/pydry@<40-character-release-commit-sha>
+  uses: hesreallyhim/pydry@v0
 
 - name: Show pydry result
   if: always()
