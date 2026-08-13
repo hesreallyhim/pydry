@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pydry-cli"
-version = "0.0.3"
+version = "0.1.0"
 description = "AST-based duplicate and structural similarity detector for Python"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -81,6 +81,19 @@ exclude = ["^demo/"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.pydry]
+root = "src"
+threshold = 0.8
+top_k = 200
+strict = true
+normalize_local_names = true
+normalize_constants = true
+max_exact_groups = 6
+max_abstract_candidates = 7
+fail_on_scan_errors = true
+fail_on_plugin_errors = true
+annotation_limit = 10
 
 [tool.coverage.run]
 source = ["src/pydry"]
