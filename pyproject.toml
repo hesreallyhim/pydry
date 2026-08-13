@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pydry-cli"
-version = "0.0.3"
+version = "0.1.0"
 description = "AST-based duplicate and structural similarity detector for Python"
 readme = "README.md"
 requires-python = ">=3.11"

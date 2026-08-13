@@ -1,6 +1,6 @@
 # pydry
 
-`pydry` is a small Python CLI for finding exact duplicate functions and structurally similar functions in Python code.
+pydry is a Python library for maintaining DRY code - it scans your repository looking for exact duplicate functions, nearly duplicate functions, and functions with varying degrees of strucural similarity. It can be used in CI to identify any new code that would violate DRYness, and it can also be used as a guide when refactoring, by highlighting code blocks that are similar enough to be good candidates for dedpulication.
 
 ## Features
 
@@ -8,7 +8,6 @@
 - Ranks near matches by structural similarity and refactorability.
 - Flags likely abstraction candidates and common risk signals.
 - Emits text output for quick inspection and JSON output for automation.
-- Runs without third-party runtime dependencies.
 
 ## Installation
 
@@ -50,6 +49,28 @@ Write a full JSON report:
 ```bash
 pydry report ./src --output reports/pydry-report.json
 ```
+
+## GitHub Actions
+
+This repository also ships a GitHub Action so that you can easily incorporate pydry into your CI/CD workflows:
+
+```yaml
+name: pydry
+on:
+  pull_request:
+  merge_group:
+permissions:
+  contents: read
+jobs:
+  pydry:
+    name: pydry
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: hesreallyhim/pydry@v0
+```
+
+If you want to enforce DRYness standards, you can configure the pydry job as a required status check. Policy lives in a standalone `pydry.toml`; action inputs can override individual settings.
 
 ## Commands
 
@@ -108,6 +129,18 @@ pydry report ./src
 pydry report ./src --threshold 0.82 --top-k 250 --output reports/pydry-report.json
 ```
 
+### `pydry check`
+
+Evaluate findings against `pydry.toml` and return a CI-friendly status: `0` for pass, `1` for a policy violation, or `2` for configuration/execution failure.
+
+```bash
+pydry check
+pydry check ./src --max-exact-groups 0 --max-abstract-candidates 5
+pydry check --config config/pydry.toml --output reports/pydry-check.json
+```
+
+Command-line values override repository configuration. Use `none` for a `--max-*` option when that finding category should be reported but not enforced. The complete configuration and GitHub rendering reference is in the [integration guide](docs/github-action.md).
+
 ### `pydry showcase` and `pydry simulate`
 
 Run a compact terminal summary. Both commands use the same analysis pipeline. With no path, they scan the current directory.
@@ -135,16 +168,24 @@ JSON-capable commands return an envelope:
 }
 ```
 
-Near and abstract entries include:
+Near and abstract entries include scores, supporting evidence, pattern labels, differences, risk flags, and a suggested refactor.
 
-- `similarity_score`
-- `refactorability_score`
-- `pattern_labels`
-- `shared_structure_summary`
-- `key_differences`
-- `risk_flags`
-- `suggested_refactor_kind`
-- `evidence`
+### Similarity metrics
+
+All scores range from `0` to `1`; higher values indicate a stronger match for that heuristic.
+
+| Metric | What it measures |
+| --- | --- |
+| `similarity_score` | Overall structural resemblance, combining the evidence metrics below. `--threshold` filters on this score. |
+| `refactorability_score` | How promising the pair appears for consolidation, accounting for structural evidence, recognized patterns, and refactoring risks. Results are ranked by this score. |
+| `shape_similarity` | Overlap in the kinds and counts of AST nodes used by the two functions. |
+| `stmt_similarity` | Similarity in the order of statement kinds. |
+| `call_similarity` | Overlap in the names and counts of functions or methods called. |
+| `signature_similarity` | Similarity in parameter count and async or generator behavior. |
+| `wrapper_score` | Evidence that one or both functions are thin wrappers, especially around the same target. |
+| `curry_score` | Evidence that the functions construct partial applications by returning lambdas with similar nesting. |
+
+`metadata.size_ratio` compares the smaller function's statement count with the larger function's. These metrics are heuristics, not probabilities or proof that two functions are semantically equivalent.
 
 ## Python API
 
@@ -169,16 +210,6 @@ rows = near_matches(Path("src"), threshold=0.85, top_k=25)
 - Cross-file import resolution is not attempted.
 - Generated abstraction templates are suggestions, not executable patches.
 
-## Development
-
-```bash
-make check
-make coverage
-make check-dist
-```
-
-The package supports Python 3.11 and newer.
-
 ## License
 
-`pydry` is released under the MIT License. See [LICENSE](LICENSE).
+pydry is released under the MIT License. See [LICENSE](LICENSE).

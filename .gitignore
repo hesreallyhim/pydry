@@ -91,6 +91,7 @@ pids/
 *.pid
 *.seed
 *.pid.lock
+.pydry/
 
 # Environment variables
 .env

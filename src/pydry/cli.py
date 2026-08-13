@@ -6,6 +6,8 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .check import run_check
+from .config import CONFIG_FILENAME, ConfigError, apply_overrides, load_check_config
 from .engine import abstract_candidates, exact_groups, near_matches, to_jsonable
 
 if TYPE_CHECKING:
@@ -80,6 +82,20 @@ def _parse_top_k(value: str) -> int:
         msg = "top-k must be >= 0"
         raise argparse.ArgumentTypeError(msg)
     return parsed
+
+
+def _parse_non_negative(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        msg = "value must be >= 0"
+        raise argparse.ArgumentTypeError(msg)
+    return parsed
+
+
+def _parse_optional_limit(value: str) -> int | str:
+    if value.lower() == "none":
+        return "none"
+    return _parse_non_negative(value)
 
 
 def _add_json_output_arg(parser: argparse.ArgumentParser) -> None:
@@ -416,6 +432,63 @@ def main(argv: list[str] | None = None) -> int:
     p_report.add_argument("--format", choices=("json",), default="json")
     _add_json_output_arg(p_report)
 
+    p_check = sub.add_parser(
+        "check",
+        help="Evaluate repository findings against a configurable CI policy.",
+    )
+    p_check.add_argument("root", nargs="?", default=None)
+    p_check.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help="Read settings from this standalone pydry TOML file.",
+    )
+    p_check.add_argument("--threshold", type=_parse_threshold, default=None)
+    p_check.add_argument("--top-k", type=_parse_top_k, default=None)
+    p_check.add_argument(
+        "--top-level-only", action=argparse.BooleanOptionalAction, default=None
+    )
+    p_check.add_argument(
+        "--strict", action=argparse.BooleanOptionalAction, default=None
+    )
+    p_check.add_argument(
+        "--normalize-local-names",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
+    p_check.add_argument(
+        "--normalize-constants",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
+    p_check.add_argument("--max-exact-groups", type=_parse_optional_limit, default=None)
+    p_check.add_argument("--max-near-matches", type=_parse_optional_limit, default=None)
+    p_check.add_argument(
+        "--max-abstract-candidates", type=_parse_optional_limit, default=None
+    )
+    p_check.add_argument(
+        "--fail-on-scan-errors",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
+    p_check.add_argument(
+        "--fail-on-plugin-errors",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
+    p_check.add_argument("--annotation-limit", type=_parse_non_negative, default=None)
+    p_check.add_argument(
+        "--output",
+        type=Path,
+        default=Path("pydry-report.json"),
+        help="Write the complete JSON check report to this path.",
+    )
+    p_check.add_argument(
+        "--github",
+        action="store_true",
+        help="Emit GitHub annotations, job summary, and action outputs.",
+    )
+
     p_show = sub.add_parser(
         "showcase",
         help=(
@@ -434,6 +507,40 @@ def main(argv: list[str] | None = None) -> int:
     _add_showcase_args(p_sim)
 
     args = ap.parse_args(argv)
+
+    if args.cmd == "check":
+        try:
+            config = load_check_config(args.config)
+            config_path = args.config
+            if config_path is None and Path(CONFIG_FILENAME).is_file():
+                config_path = Path(CONFIG_FILENAME)
+            config = apply_overrides(
+                config,
+                root=args.root,
+                threshold=args.threshold,
+                top_k=args.top_k,
+                top_level_only=args.top_level_only,
+                strict=args.strict,
+                normalize_local_names=args.normalize_local_names,
+                normalize_constants=args.normalize_constants,
+                max_exact_groups=args.max_exact_groups,
+                max_near_matches=args.max_near_matches,
+                max_abstract_candidates=args.max_abstract_candidates,
+                fail_on_scan_errors=args.fail_on_scan_errors,
+                fail_on_plugin_errors=args.fail_on_plugin_errors,
+                annotation_limit=args.annotation_limit,
+            )
+        except ConfigError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 2
+        return run_check(
+            root=Path(config.root),
+            config=config,
+            output_path=args.output,
+            github=args.github,
+            config_path=config_path,
+        )
+
     root = Path(args.root)
     if not root.exists() or not root.is_dir():
         print(f"Invalid directory: {root}", file=sys.stderr)

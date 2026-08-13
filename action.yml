@@ -1,0 +1,164 @@
+name: pydry code-quality check
+description: Check Python code for duplicate and structurally similar functions.
+author: Really Him
+
+branding:
+  icon: copy
+  color: purple
+
+inputs:
+  root:
+    description: Directory to scan; blank uses pydry.toml or the built-in default.
+    required: false
+  config:
+    description: Path to pydry.toml; blank discovers it in the workspace root.
+    required: false
+  report:
+    description: Path where pydry writes its JSON report.
+    required: false
+    default: .pydry/pydry-report.json
+  python-version:
+    description: Python version used to run pydry.
+    required: false
+    default: "3.11"
+  threshold:
+    description: Similarity threshold override; blank uses pydry.toml.
+    required: false
+  top-k:
+    description: Report detail limit override; blank uses pydry.toml.
+    required: false
+  top-level-only:
+    description: Whether to ignore nested functions and methods; blank uses pydry.toml.
+    required: false
+  strict:
+    description: Whether scan errors stop analysis; blank uses pydry.toml.
+    required: false
+  normalize-local-names:
+    description: Whether local variable renames are normalized; blank uses pydry.toml.
+    required: false
+  normalize-constants:
+    description: Whether literal value changes are normalized; blank uses pydry.toml.
+    required: false
+  max-exact-groups:
+    description: Maximum exact groups or none; blank uses pydry.toml.
+    required: false
+  max-near-matches:
+    description: Maximum near matches or none; blank uses pydry.toml.
+    required: false
+  max-abstract-candidates:
+    description: Maximum abstraction candidates or none; blank uses pydry.toml.
+    required: false
+  fail-on-scan-errors:
+    description: Whether scan diagnostics fail the check; blank uses pydry.toml.
+    required: false
+  fail-on-plugin-errors:
+    description: Whether plugin diagnostics fail the check; blank uses pydry.toml.
+    required: false
+  annotation-limit:
+    description: Maximum GitHub annotations emitted; blank uses pydry.toml.
+    required: false
+
+outputs:
+  result:
+    description: Check result reported by pydry; pass or fail.
+    value: ${{ steps.check.outputs.result }}
+  report:
+    description: Path to the generated JSON report.
+    value: ${{ steps.check.outputs.report }}
+  exact-groups:
+    description: Number of exact-duplicate groups in the report.
+    value: ${{ steps.check.outputs.exact-groups }}
+  near-matches:
+    description: Number of near matches in the report.
+    value: ${{ steps.check.outputs.near-matches }}
+  abstract-candidates:
+    description: Number of abstraction candidates in the report.
+    value: ${{ steps.check.outputs.abstract-candidates }}
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install pydry
+      shell: bash
+      run: python -m pip install --disable-pip-version-check "$GITHUB_ACTION_PATH"
+
+    - name: Run pydry
+      id: check
+      shell: bash
+      env:
+        INPUT_ROOT: ${{ inputs.root }}
+        INPUT_CONFIG: ${{ inputs.config }}
+        INPUT_REPORT: ${{ inputs.report }}
+        INPUT_THRESHOLD: ${{ inputs.threshold }}
+        INPUT_TOP_K: ${{ inputs.top-k }}
+        INPUT_TOP_LEVEL_ONLY: ${{ inputs.top-level-only }}
+        INPUT_STRICT: ${{ inputs.strict }}
+        INPUT_NORMALIZE_LOCAL_NAMES: ${{ inputs.normalize-local-names }}
+        INPUT_NORMALIZE_CONSTANTS: ${{ inputs.normalize-constants }}
+        INPUT_MAX_EXACT_GROUPS: ${{ inputs.max-exact-groups }}
+        INPUT_MAX_NEAR_MATCHES: ${{ inputs.max-near-matches }}
+        INPUT_MAX_ABSTRACT_CANDIDATES: ${{ inputs.max-abstract-candidates }}
+        INPUT_FAIL_ON_SCAN_ERRORS: ${{ inputs.fail-on-scan-errors }}
+        INPUT_FAIL_ON_PLUGIN_ERRORS: ${{ inputs.fail-on-plugin-errors }}
+        INPUT_ANNOTATION_LIMIT: ${{ inputs.annotation-limit }}
+      run: |
+        set -euo pipefail
+
+        args=(check)
+
+        if [[ -n "$INPUT_ROOT" ]]; then
+          args+=("$INPUT_ROOT")
+        fi
+        if [[ -n "$INPUT_CONFIG" ]]; then
+          args+=(--config "$INPUT_CONFIG")
+        fi
+        args+=(--github --output "$INPUT_REPORT")
+
+        append_value() {
+          local value="$1"
+          local flag="$2"
+          if [[ -n "$value" ]]; then
+            args+=("$flag" "$value")
+          fi
+        }
+
+        append_boolean() {
+          local value
+          value="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+          local flag="$2"
+          if [[ -z "$value" ]]; then
+            return
+          fi
+          case "$value" in
+            true)
+              args+=("$flag")
+              ;;
+            false)
+              args+=("--no-${flag#--}")
+              ;;
+            *)
+              echo "Invalid value '$1' for $flag: expected true, false, or blank." >&2
+              exit 2
+              ;;
+          esac
+        }
+
+        append_value "$INPUT_THRESHOLD" --threshold
+        append_value "$INPUT_TOP_K" --top-k
+        append_boolean "$INPUT_TOP_LEVEL_ONLY" --top-level-only
+        append_boolean "$INPUT_STRICT" --strict
+        append_boolean "$INPUT_NORMALIZE_LOCAL_NAMES" --normalize-local-names
+        append_boolean "$INPUT_NORMALIZE_CONSTANTS" --normalize-constants
+        append_value "$INPUT_MAX_EXACT_GROUPS" --max-exact-groups
+        append_value "$INPUT_MAX_NEAR_MATCHES" --max-near-matches
+        append_value "$INPUT_MAX_ABSTRACT_CANDIDATES" --max-abstract-candidates
+        append_boolean "$INPUT_FAIL_ON_SCAN_ERRORS" --fail-on-scan-errors
+        append_boolean "$INPUT_FAIL_ON_PLUGIN_ERRORS" --fail-on-plugin-errors
+        append_value "$INPUT_ANNOTATION_LIMIT" --annotation-limit
+
+        pydry "${args[@]}"
