@@ -1,6 +1,6 @@
 # pydry
 
-`pydry` is a Python library for maintaining DRY code - it scans your repository looking for exact duplicate functions, nearly duplicate functions, and functions with varying degrees of strucural similarity. It can be used in CI to identify any new code that would violate DRYness, and it can also be used as a guide when refactoring, by highlighting code blocks that are similar enough to be good candidates for dedpulication.
+pydry is a Python library for maintaining DRY code - it scans your repository looking for exact duplicate functions, nearly duplicate functions, and functions with varying degrees of strucural similarity. It can be used in CI to identify any new code that would violate DRYness, and it can also be used as a guide when refactoring, by highlighting code blocks that are similar enough to be good candidates for dedpulication.
 
 ## Features
 
@@ -52,7 +52,7 @@ pydry report ./src --output reports/pydry-report.json
 
 ## GitHub Actions
 
-This repository also ships a GitHub Action so that you can easily incorporate `pydry` into your CI/CD workflows:
+This repository also ships a GitHub Action so that you can easily incorporate pydry into your CI/CD workflows:
 
 ```yaml
 name: pydry
@@ -70,7 +70,7 @@ jobs:
       - uses: hesreallyhim/pydry@v0
 ```
 
-Configure the `pydry` job as a required status check. Policy lives in a standalone `pydry.toml`; action inputs can override individual settings. See the [GitHub Actions integration guide](docs/github-action.md) for configuration, outputs, permissions, merge queues, and CODEOWNERS guidance.
+If you want to enforce DRYness standards, you can configure the pydry job as a required status check. Policy lives in a standalone `pydry.toml`; action inputs can override individual settings.
 
 ## Commands
 
@@ -168,16 +168,24 @@ JSON-capable commands return an envelope:
 }
 ```
 
-Near and abstract entries include:
+Near and abstract entries include scores, supporting evidence, pattern labels, differences, risk flags, and a suggested refactor.
 
-- `similarity_score`
-- `refactorability_score`
-- `pattern_labels`
-- `shared_structure_summary`
-- `key_differences`
-- `risk_flags`
-- `suggested_refactor_kind`
-- `evidence`
+### Similarity metrics
+
+All scores range from `0` to `1`; higher values indicate a stronger match for that heuristic.
+
+| Metric | What it measures |
+| --- | --- |
+| `similarity_score` | Overall structural resemblance, combining the evidence metrics below. `--threshold` filters on this score. |
+| `refactorability_score` | How promising the pair appears for consolidation, accounting for structural evidence, recognized patterns, and refactoring risks. Results are ranked by this score. |
+| `shape_similarity` | Overlap in the kinds and counts of AST nodes used by the two functions. |
+| `stmt_similarity` | Similarity in the order of statement kinds. |
+| `call_similarity` | Overlap in the names and counts of functions or methods called. |
+| `signature_similarity` | Similarity in parameter count and async or generator behavior. |
+| `wrapper_score` | Evidence that one or both functions are thin wrappers, especially around the same target. |
+| `curry_score` | Evidence that the functions construct partial applications by returning lambdas with similar nesting. |
+
+`metadata.size_ratio` compares the smaller function's statement count with the larger function's. These metrics are heuristics, not probabilities or proof that two functions are semantically equivalent.
 
 ## Python API
 
@@ -202,23 +210,6 @@ rows = near_matches(Path("src"), threshold=0.85, top_k=25)
 - Cross-file import resolution is not attempted.
 - Generated abstraction templates are suggestions, not executable patches.
 
-## Development
-
-The complete local check requires Python 3.11 or newer and Go 1.25 or newer. The Makefile runs the pinned actionlint `v1.7.12` module through `go run`, so no separate actionlint installation is required.
-
-```bash
-make check
-make actionlint
-make coverage
-make check-dist
-```
-
-The package supports Python 3.11 and newer.
-
-## Releases
-
-Release Please derives versions and changelog entries from Conventional Commit pull-request titles. See [the release guide](docs/releasing.md) for repository setup and the maintainer workflow.
-
 ## License
 
-`pydry` is released under the MIT License. See [LICENSE](LICENSE).
+pydry is released under the MIT License. See [LICENSE](LICENSE).

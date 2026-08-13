@@ -28,12 +28,6 @@ jobs:
         uses: hesreallyhim/pydry@v0
 ```
 
-The checkout step makes the repository source available for pydry to scan.
-
-The `merge_group` trigger is necessary when the repository uses GitHub merge queues. Without it, the required pydry check will not run for the temporary merge-group commit. The workflow needs only `contents: read`; do not grant write permissions to this analysis job. Prefer `pull_request` to `pull_request_target`, especially for contributions from forks.
-
-After the workflow has run at least once, configure the job named `pydry` as a required status check in the branch ruleset or branch-protection rule. Keep the job name stable: renaming it also changes the status-check name GitHub expects.
-
 ## Configure policy
 
 Project-wide settings live as top-level keys in a standalone `pydry.toml`:
@@ -73,15 +67,6 @@ When a key is omitted, pydry uses these built-in defaults:
 | `fail_on_scan_errors` | `true` |
 | `fail_on_plugin_errors` | `true` |
 | `annotation_limit` | `10` |
-
-Commit the policy with the source it governs. To require review when policy or CI wiring changes, add entries such as these to `.github/CODEOWNERS`:
-
-```text
-/pydry.toml                     @your-org/code-quality
-/.github/workflows/pydry.yml   @your-org/code-quality
-```
-
-Enable code-owner approval in the branch ruleset so that CODEOWNERS is enforced rather than merely informational.
 
 ## Override settings in a workflow
 
