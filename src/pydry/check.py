@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -117,9 +118,11 @@ def _report_payload(
     near_rows: list[SimilarityResult],
     abstract_rows: list[SimilarityResult],
     violations: list[PolicyViolation],
+    config_path: Path | None,
 ) -> dict[str, Any]:
     return {
         "root": str(root),
+        "config": str(config_path) if config_path is not None else None,
         "settings": {
             "threshold": config.threshold,
             "top_k": config.top_k,
@@ -242,6 +245,7 @@ def _write_github_summary(
     summary: dict[str, int],
     violations: list[PolicyViolation],
     report: Path,
+    config_path: Path | None,
 ) -> None:
     summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
     if not summary_path:
@@ -250,6 +254,37 @@ def _write_github_summary(
     exact_limit = _display_limit(config.max_exact_groups)
     near_limit = _display_limit(config.max_near_matches)
     abstract_limit = _display_limit(config.max_abstract_candidates)
+    reproduce = ["pydry", "check", str(root)]
+    if config_path is not None:
+        reproduce.extend(["--config", str(config_path)])
+    reproduce.extend(
+        [
+            "--threshold",
+            str(config.threshold),
+            "--top-k",
+            str(config.top_k),
+        ]
+    )
+    boolean_options = {
+        "top-level-only": config.top_level_only,
+        "strict": config.strict,
+        "normalize-local-names": config.normalize_local_names,
+        "normalize-constants": config.normalize_constants,
+        "fail-on-scan-errors": config.fail_on_scan_errors,
+        "fail-on-plugin-errors": config.fail_on_plugin_errors,
+    }
+    reproduce.extend(
+        f"--{name}" if enabled else f"--no-{name}"
+        for name, enabled in boolean_options.items()
+    )
+    limits = {
+        "max-exact-groups": config.max_exact_groups,
+        "max-near-matches": config.max_near_matches,
+        "max-abstract-candidates": config.max_abstract_candidates,
+    }
+    for name, value in limits.items():
+        reproduce.extend([f"--{name}", "none" if value is None else str(value)])
+    reproduce.extend(["--annotation-limit", str(config.annotation_limit)])
     lines = [
         f"## pydry check: {status}",
         "",
@@ -268,7 +303,7 @@ def _write_github_summary(
         "",
         "Reproduce locally:",
         "",
-        f"```console\npydry check {root}\n```",
+        f"```console\n{shlex.join(reproduce)}\n```",
     ]
     if violations:
         lines.extend(["", "### Policy violations", ""])
@@ -287,6 +322,7 @@ def run_check(
     config: CheckConfig,
     output_path: Path,
     github: bool,
+    config_path: Path | None = None,
 ) -> int:
     """Run analysis, persist a report, render CI feedback, and return 0/1/2."""
 
@@ -345,6 +381,7 @@ def run_check(
         near_rows=near_rows,
         abstract_rows=abstract_rows,
         violations=violations,
+        config_path=config_path,
     )
     envelope = {
         "results": payload,
@@ -408,6 +445,7 @@ def run_check(
                 summary=typed_summary,
                 violations=violations,
                 report=output_path,
+                config_path=config_path,
             )
         except OSError as exc:
             print(f"Error: Could not write GitHub metadata: {exc}", file=sys.stderr)

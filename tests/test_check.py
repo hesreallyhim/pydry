@@ -39,6 +39,7 @@ class CheckCommandTests(unittest.TestCase):
         report: Path,
         *,
         github: bool = False,
+        config_path: Path | None = None,
     ) -> tuple[int, str, str]:
         stdout = io.StringIO()
         stderr = io.StringIO()
@@ -48,6 +49,7 @@ class CheckCommandTests(unittest.TestCase):
                 config=config,
                 output_path=report,
                 github=github,
+                config_path=config_path,
             )
         return return_code, stdout.getvalue(), stderr.getvalue()
 
@@ -100,6 +102,7 @@ class CheckCommandTests(unittest.TestCase):
             set(results),
             {
                 "root",
+                "config",
                 "settings",
                 "summary",
                 "check",
@@ -326,6 +329,7 @@ class CheckCommandTests(unittest.TestCase):
                 CheckConfig(),
                 report,
                 github=True,
+                config_path=Path("config/pydry policy.toml"),
             )
 
         self.assertEqual(return_code, 0)
@@ -343,7 +347,12 @@ class CheckCommandTests(unittest.TestCase):
         self.assertIn("## pydry check: Passed", summary)
         self.assertIn("| Exact duplicate groups | 0 | 0 |", summary)
         self.assertIn(f"Report: `{report}`", summary)
-        self.assertIn(f"pydry check {root}", summary)
+        self.assertIn(
+            f"pydry check {root} --config 'config/pydry policy.toml'",
+            summary,
+        )
+        payload = json.loads(report.read_text(encoding="utf-8"))
+        self.assertEqual(payload["results"]["config"], "config/pydry policy.toml")
 
     def test_github_metadata_write_error_returns_two(self):
         root = self._make_repo()

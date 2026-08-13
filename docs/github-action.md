@@ -36,10 +36,9 @@ After the workflow has run at least once, configure the job named `pydry` as a r
 
 ## Configure policy
 
-Project-wide settings live under `[tool.pydry]` in `pyproject.toml`. Configuration keys use underscores:
+Project-wide settings live as top-level keys in a standalone `pydry.toml`:
 
 ```toml
-[tool.pydry]
 threshold = 0.85
 top_k = 100
 top_level_only = false
@@ -78,7 +77,7 @@ When a key is omitted, pydry uses these built-in defaults:
 Commit the policy with the source it governs. To require review when policy or CI wiring changes, add entries such as these to `.github/CODEOWNERS`:
 
 ```text
-/pyproject.toml                 @your-org/code-quality
+/pydry.toml                     @your-org/code-quality
 /.github/workflows/pydry.yml   @your-org/code-quality
 ```
 
@@ -86,14 +85,14 @@ Enable code-owner approval in the branch ruleset so that CODEOWNERS is enforced 
 
 ## Override settings in a workflow
 
-Every policy input is optional. A blank input defers to `pyproject.toml`; a nonblank input overrides the corresponding `[tool.pydry]` value for that run. This includes `root`, which is blank by default so that `tool.pydry.root` can select the scanned directory. If the repository has no `pyproject.toml`, set `config: ""` to use pydry's built-in defaults.
+Every policy input is optional. A blank input defers to `pydry.toml`; a nonblank input overrides the corresponding file value for that run. This includes `root`, which is blank by default so that the repository policy can select the scanned directory. When `config` is blank, pydry automatically loads `pydry.toml` from the working directory when it exists and otherwise uses built-in defaults.
 
 ```yaml
 - name: Check duplication policy
   uses: hesreallyhim/pydry@<40-character-release-commit-sha>
   with:
     root: src
-    config: pyproject.toml
+    config: config/pydry.toml
     report: reports/pydry-report.json
     python-version: "3.12"
     threshold: "0.88"
@@ -108,8 +107,8 @@ Boolean overrides accept `true` or `false`. Leaving them blank preserves the pro
 
 | Input | Default | Purpose |
 | --- | --- | --- |
-| `root` | blank | Directory to scan; defers to `[tool.pydry]` and then `.` |
-| `config` | `pyproject.toml` | TOML file containing `[tool.pydry]`; blank omits `--config` |
+| `root` | blank | Directory to scan; defers to `pydry.toml` and then `.` |
+| `config` | blank | Path to `pydry.toml`; blank discovers it in the workspace root |
 | `report` | `.pydry/pydry-report.json` | JSON report destination |
 | `python-version` | `3.11` | Python runtime for the action |
 | `threshold` | blank | Similarity threshold |
@@ -125,7 +124,7 @@ Boolean overrides accept `true` or `false`. Leaving them blank preserves the pro
 | `fail-on-plugin-errors` | blank | Treat plugin diagnostics as policy failures |
 | `annotation-limit` | blank | Maximum annotations written to the job log |
 
-Paths are resolved in the checked-out repository workspace. pydry creates missing parent directories for a custom report path.
+Paths and automatic configuration discovery are resolved from the current working directory—the checked-out repository workspace in the standard action setup. Discovery does not search parent directories or the positional scan root. Use `config`/`--config` when invoking pydry from another directory. pydry creates missing parent directories for a custom report path.
 
 ## Outputs and exit status
 
@@ -142,8 +141,10 @@ The action exposes these string outputs:
 The underlying CLI contract is:
 
 ```text
-pydry check [ROOT] --config PATH --github --output PATH
+pydry check [ROOT] [--config PATH] --github --output PATH
 ```
+
+The JSON report records the effective configuration path. The GitHub job summary emits a local reproduction command containing that path and every effective policy override, so it continues to reproduce the run even if the checked-in policy later changes.
 
 Exit status `0` means the policy passed, `1` means findings violated the configured policy, and `2` means configuration or execution failed. The action preserves that status, so both violations and operational errors fail the step. If configuration or execution fails before analysis produces a report, the outputs may be empty. A policy failure can be inspected by later steps by assigning an `id` and using `continue-on-error: true`, but do not use that setting on the required check unless a later step deliberately restores the failure:
 

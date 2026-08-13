@@ -10,6 +10,9 @@ class ConfigError(ValueError):
     """Raised when pydry configuration cannot be loaded or validated."""
 
 
+CONFIG_FILENAME = "pydry.toml"
+
+
 @dataclass(frozen=True)
 class CheckConfig:
     """Effective settings for the policy-oriented check command."""
@@ -45,7 +48,7 @@ _OPTIONAL_COUNT_KEYS = {
 }
 
 
-def _read_pydry_table(path: Path) -> dict[str, object]:
+def _read_config(path: Path) -> dict[str, object]:
     try:
         parsed: dict[str, Any] = tomllib.loads(path.read_text(encoding="utf-8"))
     except OSError as exc:
@@ -53,13 +56,7 @@ def _read_pydry_table(path: Path) -> dict[str, object]:
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"Invalid TOML in {path}: {exc}") from exc
 
-    tool = parsed.get("tool", {})
-    if not isinstance(tool, dict):
-        raise ConfigError(f"[tool] in {path} must be a table")
-    raw = tool.get("pydry", {})
-    if not isinstance(raw, dict):
-        raise ConfigError(f"[tool.pydry] in {path} must be a table")
-    return {str(key): value for key, value in raw.items()}
+    return {str(key): value for key, value in parsed.items()}
 
 
 def _validate_count(key: str, value: object, *, optional: bool) -> int | None:
@@ -69,9 +66,9 @@ def _validate_count(key: str, value: object, *, optional: bool) -> int | None:
         return None
     if isinstance(value, bool) or not isinstance(value, int):
         expected = "an integer or the string 'none'" if optional else "an integer"
-        raise ConfigError(f"tool.pydry.{key} must be {expected}")
+        raise ConfigError(f"{key} must be {expected}")
     if value < 0:
-        raise ConfigError(f"tool.pydry.{key} must be >= 0")
+        raise ConfigError(f"{key} must be >= 0")
     return value
 
 
@@ -79,20 +76,20 @@ def _validate_config_values(values: dict[str, object]) -> dict[str, object]:
     unknown = sorted(set(values) - _CONFIG_KEYS)
     if unknown:
         joined = ", ".join(unknown)
-        raise ConfigError(f"Unknown [tool.pydry] setting(s): {joined}")
+        raise ConfigError(f"Unknown pydry setting(s): {joined}")
 
     validated: dict[str, object] = {}
     for key, value in values.items():
         if key == "root":
             if not isinstance(value, str) or not value:
-                raise ConfigError("tool.pydry.root must be a non-empty string")
+                raise ConfigError("root must be a non-empty string")
             validated[key] = value
         elif key == "threshold":
             if isinstance(value, bool) or not isinstance(value, (int, float)):
-                raise ConfigError("tool.pydry.threshold must be a number")
+                raise ConfigError("threshold must be a number")
             threshold = float(value)
             if not 0.0 <= threshold <= 1.0:
-                raise ConfigError("tool.pydry.threshold must be between 0 and 1")
+                raise ConfigError("threshold must be between 0 and 1")
             validated[key] = threshold
         elif key == "top_k":
             count = _validate_count(key, value, optional=False)
@@ -106,24 +103,26 @@ def _validate_config_values(values: dict[str, object]) -> dict[str, object]:
             validated[key] = count
         elif key in _BOOL_KEYS:
             if not isinstance(value, bool):
-                raise ConfigError(f"tool.pydry.{key} must be true or false")
+                raise ConfigError(f"{key} must be true or false")
             validated[key] = value
     return validated
 
 
 def load_check_config(config_path: Path | None) -> CheckConfig:
-    """Load `[tool.pydry]`, discovering pyproject.toml when no path is given."""
+    """Load a standalone TOML policy, discovering pydry.toml by default."""
 
     path = config_path
     if path is None:
-        discovered = Path("pyproject.toml")
+        discovered = Path(CONFIG_FILENAME)
         if not discovered.is_file():
             return CheckConfig()
         path = discovered
     elif not path.is_file():
         raise ConfigError(f"Configuration file does not exist: {path}")
+    if path.name != CONFIG_FILENAME:
+        raise ConfigError(f"Configuration file must be named {CONFIG_FILENAME}: {path}")
 
-    values = _validate_config_values(_read_pydry_table(path))
+    values = _validate_config_values(_read_config(path))
     return _merge(CheckConfig(), values)
 
 

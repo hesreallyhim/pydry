@@ -72,7 +72,7 @@ jobs:
       - uses: hesreallyhim/pydry@<40-character-release-commit-sha>
 ```
 
-Pin the pydry action to a reviewed, immutable commit SHA, then configure the `pydry` job as a required status check. Policy lives in `[tool.pydry]` in `pyproject.toml`; action inputs can override individual settings. See the [GitHub Actions integration guide](docs/github-action.md) for configuration, outputs, permissions, merge queues, and CODEOWNERS guidance.
+Pin the pydry action to a reviewed, immutable commit SHA, then configure the `pydry` job as a required status check. Policy lives in a standalone `pydry.toml`; action inputs can override individual settings. See the [GitHub Actions integration guide](docs/github-action.md) for configuration, outputs, permissions, merge queues, and CODEOWNERS guidance.
 
 ## Commands
 
@@ -133,12 +133,12 @@ pydry report ./src --threshold 0.82 --top-k 250 --output reports/pydry-report.js
 
 ### `pydry check`
 
-Evaluate findings against `[tool.pydry]` and return a CI-friendly status: `0` for pass, `1` for a policy violation, or `2` for configuration/execution failure.
+Evaluate findings against `pydry.toml` and return a CI-friendly status: `0` for pass, `1` for a policy violation, or `2` for configuration/execution failure.
 
 ```bash
 pydry check
 pydry check ./src --max-exact-groups 0 --max-abstract-candidates 5
-pydry check --config pyproject.toml --output reports/pydry-check.json
+pydry check --config config/pydry.toml --output reports/pydry-check.json
 ```
 
 Command-line values override repository configuration. Use `none` for a `--max-*` option when that finding category should be reported but not enforced. The complete configuration and GitHub rendering reference is in the [integration guide](docs/github-action.md).

@@ -8,12 +8,11 @@ branding:
 
 inputs:
   root:
-    description: Directory to scan; blank uses [tool.pydry] or its built-in default.
+    description: Directory to scan; blank uses pydry.toml or the built-in default.
     required: false
   config:
-    description: Path to the pyproject.toml containing [tool.pydry].
+    description: Path to pydry.toml; blank discovers it in the workspace root.
     required: false
-    default: pyproject.toml
   report:
     description: Path where pydry writes its JSON report.
     required: false
@@ -23,40 +22,40 @@ inputs:
     required: false
     default: "3.11"
   threshold:
-    description: Similarity threshold override; blank uses [tool.pydry].
+    description: Similarity threshold override; blank uses pydry.toml.
     required: false
   top-k:
-    description: Report detail limit override; blank uses [tool.pydry].
+    description: Report detail limit override; blank uses pydry.toml.
     required: false
   top-level-only:
-    description: Whether to ignore nested functions and methods; blank uses [tool.pydry].
+    description: Whether to ignore nested functions and methods; blank uses pydry.toml.
     required: false
   strict:
-    description: Whether scan errors stop analysis; blank uses [tool.pydry].
+    description: Whether scan errors stop analysis; blank uses pydry.toml.
     required: false
   normalize-local-names:
-    description: Whether local variable renames are normalized; blank uses [tool.pydry].
+    description: Whether local variable renames are normalized; blank uses pydry.toml.
     required: false
   normalize-constants:
-    description: Whether literal value changes are normalized; blank uses [tool.pydry].
+    description: Whether literal value changes are normalized; blank uses pydry.toml.
     required: false
   max-exact-groups:
-    description: Maximum exact groups or none; blank uses [tool.pydry].
+    description: Maximum exact groups or none; blank uses pydry.toml.
     required: false
   max-near-matches:
-    description: Maximum near matches or none; blank uses [tool.pydry].
+    description: Maximum near matches or none; blank uses pydry.toml.
     required: false
   max-abstract-candidates:
-    description: Maximum abstraction candidates or none; blank uses [tool.pydry].
+    description: Maximum abstraction candidates or none; blank uses pydry.toml.
     required: false
   fail-on-scan-errors:
-    description: Whether scan diagnostics fail the check; blank uses [tool.pydry].
+    description: Whether scan diagnostics fail the check; blank uses pydry.toml.
     required: false
   fail-on-plugin-errors:
-    description: Whether plugin diagnostics fail the check; blank uses [tool.pydry].
+    description: Whether plugin diagnostics fail the check; blank uses pydry.toml.
     required: false
   annotation-limit:
-    description: Maximum GitHub annotations emitted; blank uses [tool.pydry].
+    description: Maximum GitHub annotations emitted; blank uses pydry.toml.
     required: false
 
 outputs:
@@ -129,7 +128,8 @@ runs:
         }
 
         append_boolean() {
-          local value="${1,,}"
+          local value
+          value="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
           local flag="$2"
           if [[ -z "$value" ]]; then
             return

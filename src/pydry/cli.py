@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .check import run_check
-from .config import ConfigError, apply_overrides, load_check_config
+from .config import CONFIG_FILENAME, ConfigError, apply_overrides, load_check_config
 from .engine import abstract_candidates, exact_groups, near_matches, to_jsonable
 
 if TYPE_CHECKING:
@@ -441,7 +441,7 @@ def main(argv: list[str] | None = None) -> int:
         "--config",
         type=Path,
         default=None,
-        help="Read settings from [tool.pydry] in this TOML file.",
+        help="Read settings from this standalone pydry TOML file.",
     )
     p_check.add_argument("--threshold", type=_parse_threshold, default=None)
     p_check.add_argument("--top-k", type=_parse_top_k, default=None)
@@ -511,6 +511,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "check":
         try:
             config = load_check_config(args.config)
+            config_path = args.config
+            if config_path is None and Path(CONFIG_FILENAME).is_file():
+                config_path = Path(CONFIG_FILENAME)
             config = apply_overrides(
                 config,
                 root=args.root,
@@ -535,6 +538,7 @@ def main(argv: list[str] | None = None) -> int:
             config=config,
             output_path=args.output,
             github=args.github,
+            config_path=config_path,
         )
 
     root = Path(args.root)

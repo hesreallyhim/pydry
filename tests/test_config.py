@@ -20,11 +20,11 @@ class CheckConfigTests(unittest.TestCase):
         return Path(temporary.name)
 
     def _write_config(self, content: str) -> Path:
-        path = self._temporary_directory() / "pyproject.toml"
+        path = self._temporary_directory() / "pydry.toml"
         path.write_text(textwrap.dedent(content), encoding="utf-8")
         return path
 
-    def test_defaults_when_discovery_finds_no_pyproject(self):
+    def test_defaults_when_discovery_finds_no_pydry_toml(self):
         root = self._temporary_directory()
         original_cwd = os.getcwd()
         self.addCleanup(os.chdir, original_cwd)
@@ -32,15 +32,23 @@ class CheckConfigTests(unittest.TestCase):
 
         self.assertEqual(load_check_config(None), CheckConfig())
 
-    def test_discovers_pyproject_and_loads_every_setting(self):
+    def test_legacy_pyproject_configuration_is_not_discovered(self):
         root = self._temporary_directory()
         (root / "pyproject.toml").write_text(
+            "[tool.pydry]\nthreshold = 0.1\n",
+            encoding="utf-8",
+        )
+        original_cwd = os.getcwd()
+        self.addCleanup(os.chdir, original_cwd)
+        os.chdir(root)
+
+        self.assertEqual(load_check_config(None), CheckConfig())
+
+    def test_discovers_pydry_toml_and_loads_every_setting(self):
+        root = self._temporary_directory()
+        (root / "pydry.toml").write_text(
             textwrap.dedent(
                 """
-                [project]
-                name = "example"
-
-                [tool.pydry]
                 root = "src"
                 threshold = 0.91
                 top_k = 37
@@ -90,29 +98,34 @@ class CheckConfigTests(unittest.TestCase):
     def test_malformed_toml_is_an_error(self):
         path = self._write_config(
             """
-            [tool.pydry
-            threshold = 0.5
+            threshold =
             """
         )
 
         with self.assertRaisesRegex(ConfigError, "Invalid TOML"):
             load_check_config(path)
 
-    def test_non_table_tool_sections_are_rejected(self):
-        cases = {
-            "tool": 'tool = "not a table"',
-            "tool.pydry": '[tool]\npydry = "not a table"',
-        }
-        for expected, content in cases.items():
-            with self.subTest(section=expected):
-                path = self._write_config(content)
-                with self.assertRaisesRegex(ConfigError, rf"\[{expected}\].*table"):
-                    load_check_config(path)
+    def test_explicit_config_requires_canonical_filename(self):
+        path = self._temporary_directory() / "pydry.ini"
+        path.write_text("threshold = 0.5\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(ConfigError, "must be named pydry.toml"):
+            load_check_config(path)
+
+        alternate = self._temporary_directory() / "policy.toml"
+        alternate.write_text("threshold = 0.5\n", encoding="utf-8")
+        with self.assertRaisesRegex(ConfigError, "must be named pydry.toml"):
+            load_check_config(alternate)
+
+    def test_pyproject_style_table_is_rejected(self):
+        path = self._write_config("[tool.pydry]\nthreshold = 0.5\n")
+
+        with self.assertRaisesRegex(ConfigError, "Unknown pydry setting.*tool"):
+            load_check_config(path)
 
     def test_unknown_settings_are_rejected_and_sorted(self):
         path = self._write_config(
             """
-            [tool.pydry]
             zeta = 1
             alpha = 2
             """
@@ -120,7 +133,7 @@ class CheckConfigTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             ConfigError,
-            r"Unknown \[tool\.pydry\] setting\(s\): alpha, zeta",
+            r"Unknown pydry setting\(s\): alpha, zeta",
         ):
             load_check_config(path)
 
@@ -141,12 +154,12 @@ class CheckConfigTests(unittest.TestCase):
         }
         for label, assignment in cases.items():
             with self.subTest(case=label):
-                path = self._write_config(f"[tool.pydry]\n{assignment}\n")
+                path = self._write_config(f"{assignment}\n")
                 with self.assertRaises(ConfigError):
                     load_check_config(path)
 
     def test_numeric_threshold_is_coerced_to_float(self):
-        path = self._write_config("[tool.pydry]\nthreshold = 1\n")
+        path = self._write_config("threshold = 1\n")
 
         config = load_check_config(path)
 
@@ -168,7 +181,7 @@ class CheckConfigTests(unittest.TestCase):
         self.assertTrue(effective.strict)
 
     def test_none_string_disables_optional_policy_limit(self):
-        path = self._write_config('[tool.pydry]\nmax_exact_groups = "none"\n')
+        path = self._write_config('max_exact_groups = "none"\n')
 
         configured = load_check_config(path)
         overridden = apply_overrides(
@@ -179,7 +192,7 @@ class CheckConfigTests(unittest.TestCase):
         self.assertIsNone(overridden.max_exact_groups)
 
     def test_invalid_optional_policy_limit_explains_none_sentinel(self):
-        path = self._write_config('[tool.pydry]\nmax_exact_groups = "disabled"\n')
+        path = self._write_config('max_exact_groups = "disabled"\n')
 
         with self.assertRaisesRegex(ConfigError, "integer or the string 'none'"):
             load_check_config(path)
@@ -187,11 +200,11 @@ class CheckConfigTests(unittest.TestCase):
     def test_cli_values_override_config_while_unspecified_values_are_preserved(self):
         root = self._temporary_directory()
         report = root / "reports" / "check.json"
-        config_path = root / "policy.toml"
+        config_path = root / "config" / "pydry.toml"
+        config_path.parent.mkdir()
         config_path.write_text(
             textwrap.dedent(
                 """
-                [tool.pydry]
                 root = "from-config"
                 threshold = 0.25
                 top_k = 17
@@ -240,15 +253,34 @@ class CheckConfigTests(unittest.TestCase):
         self.assertEqual(effective.max_exact_groups, 1)
         self.assertIsNone(effective.max_abstract_candidates)
 
+    def test_cli_discovers_pydry_toml_without_config_option(self):
+        root = self._temporary_directory()
+        (root / "pydry.toml").write_text(
+            'root = "configured-src"\nthreshold = 0.42\n',
+            encoding="utf-8",
+        )
+        original_cwd = os.getcwd()
+        self.addCleanup(os.chdir, original_cwd)
+        os.chdir(root)
+
+        with patch("pydry.cli.run_check", return_value=0) as run:
+            return_code = main(["check", "--output", "report.json"])
+
+        self.assertEqual(return_code, 0)
+        call = run.call_args.kwargs
+        self.assertEqual(call["root"], Path("configured-src"))
+        self.assertEqual(call["config"].threshold, 0.42)
+        self.assertEqual(call["config_path"], Path("pydry.toml"))
+
     def test_cli_returns_two_for_invalid_configuration(self):
-        path = self._write_config("[tool.pydry]\nunknown = true\n")
+        path = self._write_config("unknown = true\n")
         stderr = io.StringIO()
 
         with redirect_stderr(stderr):
             return_code = main(["check", "--config", str(path)])
 
         self.assertEqual(return_code, 2)
-        self.assertIn("Unknown [tool.pydry] setting", stderr.getvalue())
+        self.assertIn("Unknown pydry setting", stderr.getvalue())
 
 
 if __name__ == "__main__":

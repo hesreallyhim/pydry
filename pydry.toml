@@ -1,0 +1,11 @@
+root = "src"
+threshold = 0.8
+top_k = 200
+strict = true
+normalize_local_names = true
+normalize_constants = true
+max_exact_groups = 6
+max_abstract_candidates = 7
+fail_on_scan_errors = true
+fail_on_plugin_errors = true
+annotation_limit = 10
