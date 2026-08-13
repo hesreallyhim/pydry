@@ -4,6 +4,8 @@ Thanks for your interest in contributing! Here's how to get started.
 
 ## Development Setup
 
+Install Python 3.11 or newer and Go 1.25 or newer before setting up the project. `make check` uses Go to run the repository-pinned actionlint release.
+
 ```bash
 # Clone the repo
 git clone <repo-url>
@@ -32,10 +34,11 @@ make pre-commit
 
 ```bash
 make lint          # Run ruff linter
+make actionlint    # Lint GitHub Actions workflows
 make format        # Auto-format with ruff
 make typecheck     # Run mypy
 make test          # Run pytest
-make check         # Run all of the above
+make check         # Run all checks, including actionlint and pydry policy
 ```
 
 ## Code Style

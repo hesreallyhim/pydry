@@ -4,6 +4,8 @@ VENV ?= venv
 VENV_BIN := $(VENV)/bin
 VENV_MARKER := $(VENV)/.created
 BOOTSTRAP_PYTHON ?= python3
+GO ?= go
+ACTIONLINT_VERSION := v1.7.12
 PYTHON := $(VENV_BIN)/python
 PIP := $(PYTHON) -m pip
 RUFF := $(VENV_BIN)/ruff
@@ -13,6 +15,7 @@ PYDRY := $(VENV_BIN)/pydry
 PRE_COMMIT := $(VENV_BIN)/pre-commit
 BUILD := $(PYTHON) -m build
 TWINE := $(PYTHON) -m twine
+ACTIONLINT ?= $(GO) run github.com/rhysd/actionlint/cmd/actionlint@$(ACTIONLINT_VERSION)
 INSTALL_STAMP := $(VENV)/.pydry-install
 
 $(STAMPS):
@@ -45,6 +48,10 @@ install: $(INSTALL_STAMP) ## Install project and dev dependencies
 .PHONY: lint
 lint: $(INSTALL_STAMP) ## Run linter
 	$(RUFF) check .
+
+.PHONY: actionlint
+actionlint: ## Lint GitHub Actions workflows
+	$(ACTIONLINT)
 
 .PHONY: format
 format: $(INSTALL_STAMP) ## Format code
@@ -79,7 +86,7 @@ demo-simulate: $(INSTALL_STAMP) ## Run a visual CLI simulation against ./demo
 	$(PYTHON) -m pydry simulate demo
 
 .PHONY: check
-check: lint format-check typecheck test pydry-check ## Run all checks
+check: lint actionlint format-check typecheck test pydry-check ## Run all checks
 
 # ── Packaging ─────────────────────────────────────────────────
 

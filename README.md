@@ -206,8 +206,11 @@ rows = near_matches(Path("src"), threshold=0.85, top_k=25)
 
 ## Development
 
+The complete local check requires Python 3.11 or newer and Go 1.25 or newer. The Makefile runs the pinned actionlint `v1.7.12` module through `go run`, so no separate actionlint installation is required.
+
 ```bash
 make check
+make actionlint
 make coverage
 make check-dist
 ```
