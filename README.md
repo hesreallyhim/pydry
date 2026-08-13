@@ -8,6 +8,7 @@
 - Ranks near matches by structural similarity and refactorability.
 - Flags likely abstraction candidates and common risk signals.
 - Emits text output for quick inspection and JSON output for automation.
+- Enforces configurable duplication policy as a GitHub required check.
 - Runs without third-party runtime dependencies.
 
 ## Installation
@@ -50,6 +51,28 @@ Write a full JSON report:
 ```bash
 pydry report ./src --output reports/pydry-report.json
 ```
+
+## GitHub Actions
+
+Use pydry as a pull-request and merge-queue check with a read-only workflow:
+
+```yaml
+name: pydry
+on:
+  pull_request:
+  merge_group:
+permissions:
+  contents: read
+jobs:
+  pydry:
+    name: pydry
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: hesreallyhim/pydry@<40-character-release-commit-sha>
+```
+
+Pin the pydry action to a reviewed, immutable commit SHA, then configure the `pydry` job as a required status check. Policy lives in `[tool.pydry]` in `pyproject.toml`; action inputs can override individual settings. See the [GitHub Actions integration guide](docs/github-action.md) for configuration, outputs, permissions, merge queues, and CODEOWNERS guidance.
 
 ## Commands
 
@@ -107,6 +130,18 @@ Generate one JSON document with exact, near, and abstract sections.
 pydry report ./src
 pydry report ./src --threshold 0.82 --top-k 250 --output reports/pydry-report.json
 ```
+
+### `pydry check`
+
+Evaluate findings against `[tool.pydry]` and return a CI-friendly status: `0` for pass, `1` for a policy violation, or `2` for configuration/execution failure.
+
+```bash
+pydry check
+pydry check ./src --max-exact-groups 0 --max-abstract-candidates 5
+pydry check --config pyproject.toml --output reports/pydry-check.json
+```
+
+Command-line values override repository configuration. Use `none` for a `--max-*` option when that finding category should be reported but not enforced. The complete configuration and GitHub rendering reference is in the [integration guide](docs/github-action.md).
 
 ### `pydry showcase` and `pydry simulate`
 
