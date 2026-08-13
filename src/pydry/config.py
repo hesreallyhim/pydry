@@ -68,7 +68,8 @@ def _validate_count(key: str, value: object, *, optional: bool) -> int | None:
     if optional and value == "none":
         return None
     if isinstance(value, bool) or not isinstance(value, int):
-        raise ConfigError(f"tool.pydry.{key} must be an integer")
+        expected = "an integer or the string 'none'" if optional else "an integer"
+        raise ConfigError(f"tool.pydry.{key} must be {expected}")
     if value < 0:
         raise ConfigError(f"tool.pydry.{key} must be >= 0")
     return value

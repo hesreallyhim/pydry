@@ -178,6 +178,12 @@ class CheckConfigTests(unittest.TestCase):
         self.assertIsNone(configured.max_exact_groups)
         self.assertIsNone(overridden.max_exact_groups)
 
+    def test_invalid_optional_policy_limit_explains_none_sentinel(self):
+        path = self._write_config('[tool.pydry]\nmax_exact_groups = "disabled"\n')
+
+        with self.assertRaisesRegex(ConfigError, "integer or the string 'none'"):
+            load_check_config(path)
+
     def test_cli_values_override_config_while_unspecified_values_are_preserved(self):
         root = self._temporary_directory()
         report = root / "reports" / "check.json"
