@@ -11,8 +11,8 @@ permissions:
   contents: read
 
 jobs:
-  actionlint:
-    name: actionlint
+  quality:
+    name: quality
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -20,27 +20,13 @@ jobs:
         with:
           go-version: "1.26.5"
           cache: false
-      - run: make actionlint
-
-  lint:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.11"
       - run: pip install -e ".[dev]"
+      - run: make actionlint
       - run: ruff check .
       - run: ruff format --check .
-
-  typecheck:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
-        with:
-          python-version: "3.11"
-      - run: pip install -e ".[dev]"
       - run: mypy
 
   test:
