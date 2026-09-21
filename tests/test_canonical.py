@@ -234,3 +234,108 @@ class AlignmentTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StructuralCoverageTests(unittest.TestCase):
+    def test_match_statement_tokens_and_pattern_bindings(self) -> None:
+        fn = _func(
+            """
+            def route(command):
+                match command:
+                    case ["go", direction]:
+                        return move(direction)
+                    case {"action": action, **rest}:
+                        return act(action, rest)
+                    case [first, *others] if others:
+                        return many(first, others)
+                    case _:
+                        return None
+            """
+        )
+        tokens = statement_tokens(fn)
+        self.assertEqual(tokens[0].kind, "Match")
+        self.assertEqual(
+            [t.kind for t in tokens if t.kind == "match_case"].__len__(), 4
+        )
+        self.assertEqual({t.depth for t in tokens if t.kind == "match_case"}, {1})
+        self.assertEqual({t.depth for t in tokens if t.kind == "Return"}, {2})
+        # Pattern-bound names are locals and get placeholders.
+        joined = " ".join(t.names for t in tokens)
+        for bound in ("direction", "rest", "first", "others"):
+            self.assertNotIn(f"'{bound}'", joined)
+        self.assertIn("'move'", joined)
+
+    def test_try_else_marker_and_bare_string_expressions(self) -> None:
+        fn = _func(
+            '''
+            def f():
+                """Doc."""
+                try:
+                    run()
+                except Error:
+                    pass
+                else:
+                    "a stray string used as a comment"
+                    done()
+            '''
+        )
+        kinds = [(t.depth, t.kind) for t in statement_tokens(fn)]
+        self.assertEqual(
+            kinds,
+            [
+                (0, "Try"),
+                (1, "Expr"),
+                (0, "ExceptHandler"),
+                (1, "Pass"),
+                (0, "Else"),
+                (1, "Expr"),
+            ],
+        )
+
+    def test_nested_class_and_async_def_contribute_headers_only(self) -> None:
+        fn = _func(
+            """
+            def outer(x):
+                @dataclass
+                class Local:
+                    value: int
+                    def method(self) -> int:
+                        return self.value
+                async def helper(y: int) -> int:
+                    return await fetch(y)
+                declared: int
+                return Local(x), helper
+            """
+        )
+        tokens = statement_tokens(fn)
+        self.assertEqual(
+            [t.kind for t in tokens],
+            ["ClassDef", "AsyncFunctionDef", "AnnAssign", "Return"],
+        )
+        # Decorators and annotations are stripped; nested scope names are locals.
+        self.assertNotIn("dataclass", tokens[0].raw)
+        self.assertNotIn("'Local'", tokens[0].names)
+        self.assertNotIn("'helper'", tokens[1].names)
+        self.assertNotIn("annotation=Name", tokens[1].raw)
+
+    def test_global_and_nonlocal_names_are_never_renamed(self) -> None:
+        fn = _func(
+            """
+            def counter():
+                global total
+                total = total + 1
+                def inner():
+                    nonlocal total
+                    return total
+                return inner
+            """
+        )
+        tokens = statement_tokens(fn)
+        self.assertIn("Global(['total'])", tokens[0].names)
+        self.assertIn("Name('total'", tokens[1].names)
+
+    def test_docstring_only_body_is_trivial(self) -> None:
+        fn = _func('def f():\n    """Only a docstring."""\n')
+        tokens = statement_tokens(fn)
+        self.assertEqual(tokens, [])
+        self.assertTrue(is_trivial(tokens))

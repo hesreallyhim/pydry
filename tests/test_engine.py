@@ -712,3 +712,74 @@ class BlockDetectionEdgeTests(RepoMixin, unittest.TestCase):
         )
         kept = suppress_covered_blocks([pair_block, triple_block, other_block], near)
         self.assertEqual([g.hash for g in kept], ["h2", "h3"])
+
+
+class RemainingBranchTests(RepoMixin, unittest.TestCase):
+    def test_pure_assignment_runs_and_short_period_repeats_are_ignored(self) -> None:
+        body = """
+        def constants():
+            a = 1
+            b = 2
+            c = 3
+            d = 4
+            e = 5
+            f = 6
+            return g(a, b, c, d, e, f)
+
+        def constants_again():
+            a = 1
+            b = 2
+            c = 3
+            d = 4
+            e = 5
+            f = 6
+            return h(a, b, c, d, e, f)
+
+        def periodic(x):
+            x = step(x)
+            x = step(x)
+            x = step(x)
+            x = step(x)
+            x = step(x)
+            x = step(x)
+            x = step(x)
+            x = step(x)
+            return x
+        """
+        root = self._make_repo({"a.py": body})
+        self.assertEqual(block_clones(root, min_statements=6, near_threshold=1.0), [])
+
+    def test_identical_bodies_with_different_signatures_fall_back_to_helper(
+        self,
+    ) -> None:
+        root = self._make_repo(
+            {
+                "a.py": """
+                def one(*items):
+                    total = start()
+                    for item in items:
+                        total = combine(total, item)
+                    return total
+
+                def two(items, **options):
+                    total = start()
+                    for item in items:
+                        total = combine(total, item)
+                    return total
+                """
+            }
+        )
+        rows = near_matches(root)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].pattern_labels, [])
+        self.assertEqual(rows[0].suggested_refactor_kind, "extract_common_helper")
+        self.assertIn("parameter count differs (1 vs 2)", rows[0].key_differences)
+
+    def test_abstract_candidates_top_k_and_jsonable_sets(self) -> None:
+        from pydry.engine import abstract_candidates, to_jsonable
+
+        root = self._make_repo({"a.py": LOADER_A, "b.py": LOADER_B, "c.py": LOADER_C})
+        self.assertEqual(len(abstract_candidates(root, threshold=0.7, top_k=1)), 1)
+        self.assertEqual(
+            to_jsonable({"names": frozenset({"b", "a"})}), {"names": ["a", "b"]}
+        )

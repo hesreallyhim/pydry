@@ -244,3 +244,44 @@ class ProfileAndExclusionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BaselineFileTests(unittest.TestCase):
+    def test_load_rejects_unreadable_malformed_and_mistyped_files(self) -> None:
+        import tempfile
+
+        from pydry.baseline import load_baseline
+
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = Path(tmp) / "missing.json"
+            with self.assertRaisesRegex(ValueError, "Could not read baseline"):
+                load_baseline(missing)
+            bad_json = Path(tmp) / "bad.json"
+            bad_json.write_text("{not json", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "Invalid JSON"):
+                load_baseline(bad_json)
+            bad_key = Path(tmp) / "key.json"
+            bad_key.write_text('{"version": 1, "exact": "abc"}', encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "must be a list of strings"):
+                load_baseline(bad_key)
+
+    def test_update_baseline_write_failure_is_an_execution_error(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "a.py").write_text(DUPLICATE, encoding="utf-8")
+            blocker = root / "blocked"
+            blocker.write_text("not a directory", encoding="utf-8")
+            stderr = io.StringIO()
+            with redirect_stdout(io.StringIO()), redirect_stderr(stderr):
+                code = run_check(
+                    root=root,
+                    config=CheckConfig(strict=False),
+                    output_path=root / "report.json",
+                    github=False,
+                    baseline_path=blocker / "baseline.json",
+                    update_baseline=True,
+                )
+            self.assertEqual(code, 2)
+            self.assertIn("Could not write baseline", stderr.getvalue())

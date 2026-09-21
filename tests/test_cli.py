@@ -720,3 +720,118 @@ class CliTextOutputTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CliCoverageTests(unittest.TestCase):
+    def _make_repo(self, files: dict[str, str]) -> Path:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        for name, content in files.items():
+            (root / name).write_text(textwrap.dedent(content), encoding="utf-8")
+        return root
+
+    BLOCK_SOURCE = """
+    def first(path):
+        with open(path) as fh:
+            raw = fh.read()
+        rows = raw.splitlines()
+        out = []
+        for row in rows:
+            if not row.strip():
+                continue
+            out.append(row)
+        out.sort()
+        return out
+
+    def second(path):
+        log(path)
+        with open(path) as fh:
+            raw = fh.read()
+        rows = raw.splitlines()
+        out = []
+        for row in rows:
+            if not row.strip():
+                continue
+            out.append(row)
+        out.sort()
+        summary = {"count": len(out)}
+        if summary["count"] == 0:
+            summary["empty"] = True
+        longest = max(out, key=len, default="")
+        summary["longest"] = longest
+        shortest = min(out, key=len, default="")
+        summary["shortest"] = shortest
+        audit(summary)
+        return summary
+    """
+
+    def test_invalid_directory_returns_two(self) -> None:
+        stderr = io.StringIO()
+        with redirect_stdout(io.StringIO()), redirect_stderr(stderr):
+            rc = main(["exact", "/definitely/not/a/dir"])
+        self.assertEqual(rc, 2)
+        self.assertIn("Invalid directory", stderr.getvalue())
+
+    def test_blocks_text_and_json_output(self) -> None:
+        root = self._make_repo({"a.py": self.BLOCK_SOURCE})
+        stdout = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+            rc = main(["blocks", str(root), "--block-min-statements", "6"])
+        self.assertEqual(rc, 0)
+        out = stdout.getvalue()
+        self.assertIn("Block 1:", out)
+        self.assertIn("in first", out)
+        self.assertIn("in second", out)
+
+        stdout = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+            rc = main(["blocks", str(root), "--format", "json"])
+        self.assertEqual(rc, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["results"][0]["count"], 2)
+
+        stdout = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+            rc = main(["blocks", str(root), "--block-min-statements", "40"])
+        self.assertEqual(rc, 0)
+        self.assertIn("No repeated blocks found", stdout.getvalue())
+
+    def test_near_text_prints_labels_risks_and_differences(self) -> None:
+        root = self._make_repo(
+            {
+                "a.py": """
+                def sync_fetch(client, key):
+                    resp = client.get(key)
+                    data = resp.json()
+                    if "error" in data:
+                        raise RuntimeError(data["error"])
+                    data.pop("meta", None)
+                    return data
+
+                async def async_fetch(client, key):
+                    resp = await client.get(key)
+                    data = await resp.json()
+                    if "error" in data:
+                        raise RuntimeError(data["error"])
+                    return data
+                """
+            }
+        )
+        stdout = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+            rc = main(["near", str(root), "--threshold", "0.5"])
+        self.assertEqual(rc, 0)
+        out = stdout.getvalue()
+        self.assertIn("labels: structural_variant", out)
+        self.assertIn("risks: async_boundary_diff", out)
+        self.assertIn("statement(s) only in sync_fetch", out)
+        self.assertIn("suggestion: leave_separate", out)
+
+    def test_showcase_text_lists_repeated_blocks(self) -> None:
+        root = self._make_repo({"a.py": self.BLOCK_SOURCE})
+        stdout = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+            rc = main(["showcase", str(root)])
+        self.assertEqual(rc, 0)
+        self.assertIn("statements x2, saves ~", stdout.getvalue())

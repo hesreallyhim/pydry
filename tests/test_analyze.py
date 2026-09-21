@@ -262,3 +262,12 @@ class TestOccurrenceFor(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CallNameTests(unittest.TestCase):
+    def test_dynamic_call_targets_are_labeled(self) -> None:
+        fn = _parse_func(
+            "def f(handlers):\n    return handlers[0](1) + (lambda: 2)()\n"
+        )
+        features = extract_features(fn)
+        self.assertEqual(features["call_names"]["<dynamic>"], 2)
