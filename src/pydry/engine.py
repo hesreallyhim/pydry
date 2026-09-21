@@ -170,6 +170,7 @@ def exact_groups(
         tier = "identical"
         opts = {**DEFAULT_EXACT_OPTS, **_TIER_OPTS["identical"]}
 
+    cacheable = opts == {**DEFAULT_EXACT_OPTS, **_TIER_OPTS[tier]}
     groups: dict[str, list[FunctionProfile]] = defaultdict(list)
     canonical_by_hash: dict[str, str] = {}
     for profile in items:
@@ -177,11 +178,14 @@ def exact_groups(
             min_statements=min_statements, ignore_trivial=ignore_trivial
         ):
             continue
-        canonical = canonicalize(profile.node, **opts)
-        h = _sha(canonical)
+        if cacheable and not include_canonical:
+            h = _tier_hash(profile, tier)
+        else:
+            canonical = canonicalize(profile.node, **opts)
+            h = _sha(canonical)
+            if include_canonical and h not in canonical_by_hash:
+                canonical_by_hash[h] = canonical
         groups[h].append(profile)
-        if include_canonical and h not in canonical_by_hash:
-            canonical_by_hash[h] = canonical
 
     res = []
     for h, members in groups.items():

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import builtins
+import copy
 import fnmatch
 import os
 from collections import Counter
@@ -146,9 +147,7 @@ def is_method(parents: list[str]) -> bool:
 
 
 def canonicalize(fn: _FuncNode, **opts: Any) -> str:
-    cloned = ast.fix_missing_locations(ast.parse(ast.unparse(fn)).body[0])
-    norm = FunctionNormalizer(**opts)
-    cloned = ast.fix_missing_locations(norm.visit(cloned))
+    cloned = FunctionNormalizer(**opts).visit(copy.deepcopy(fn))
     return ast.dump(cloned, annotate_fields=True, include_attributes=False)
 
 

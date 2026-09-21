@@ -211,17 +211,15 @@ def _first_child_line(stmt: ast.stmt) -> int | None:
 def _token_for(stmt: ast.stmt, depth: int, bound: frozenset[str]) -> StmtToken | None:
     if _is_string_expr(stmt):
         return None
-    header = _header(stmt)
-    header = ast.fix_missing_locations(_AnnotationStripper().visit(header))
+    # Locations are never dumped, so there is no need to repair them after
+    # each transformer pass.
+    header = _AnnotationStripper().visit(_header(stmt))
     raw = ast.dump(header, annotate_fields=False)
-    renamed = ast.fix_missing_locations(_StatementNormalizer(bound).visit(header))
+    renamed = _StatementNormalizer(bound).visit(header)
     names = ast.dump(renamed, annotate_fields=False)
-    abstracted = ast.fix_missing_locations(ConstantNormalizer().visit(renamed))
+    abstracted = ConstantNormalizer().visit(renamed)
     full = ast.dump(abstracted, annotate_fields=False)
-    loose = ast.dump(
-        ast.fix_missing_locations(_SlotNormalizer().visit(abstracted)),
-        annotate_fields=False,
-    )
+    loose = ast.dump(_SlotNormalizer().visit(abstracted), annotate_fields=False)
 
     is_compound = any(getattr(stmt, name, None) for name in _COMPOUND_FIELDS)
     calls = sum(1 for node in ast.walk(header) if isinstance(node, ast.Call))
