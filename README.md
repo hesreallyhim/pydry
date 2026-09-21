@@ -128,7 +128,7 @@ max_block_clones = 0        # fail on any repeated block
 max_abstract_candidates = "none"   # report near matches, do not enforce
 ```
 
-With a baseline, `check` only counts findings that are not already recorded, so an existing codebase can adopt pydry without first paying down every duplicate. Run `pydry check --update-baseline` to accept the current state, commit the file, and the check will fail only on new duplication. Baselines are keyed on the content of the duplicated code, so a baselined finding resurfaces once either side is edited.
+With a baseline, `check` only counts findings that are not already recorded, so an existing codebase can adopt pydry without first paying down every duplicate. Run `pydry check --update-baseline` to accept the current state, commit the file, and the check will fail only on new duplication. Baselines are keyed on the content of the duplicated code and record how many copies were accepted, so a baselined finding resurfaces once either side is edited or another copy appears.
 
 Profiles set defaults for the sensitivity knobs; explicit keys override them:
 

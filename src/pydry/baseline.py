@@ -11,16 +11,30 @@ if TYPE_CHECKING:
 
     from .models import BlockCloneGroup, ExactGroup, SimilarityResult
 
-BASELINE_VERSION = 1
+BASELINE_VERSION = 2
 
 
 @dataclass(frozen=True)
 class Baseline:
-    """Fingerprints of findings that a repository has chosen to accept."""
+    """Accepted findings, keyed by content.
 
-    exact: frozenset[str]
+    Exact groups and repeated blocks record the number of occurrences that
+    were accepted, so adding another copy of an accepted duplicate is still
+    reported. Near matches are pairs and are keyed by both sides' content.
+    """
+
+    exact: dict[str, int]
     near: frozenset[str]
-    blocks: frozenset[str]
+    blocks: dict[str, int]
+
+    def accepts_exact(self, group: ExactGroup) -> bool:
+        return group.count <= self.exact.get(group.hash, 0)
+
+    def accepts_block(self, group: BlockCloneGroup) -> bool:
+        return group.count <= self.blocks.get(group.hash, 0)
+
+    def accepts_near(self, row: SimilarityResult) -> bool:
+        return near_fingerprint(row) in self.near
 
 
 def near_fingerprint(row: SimilarityResult) -> str:
@@ -34,16 +48,30 @@ def load_baseline(path: Path) -> Baseline:
         raise ValueError(f"Could not read baseline {path}: {exc}") from exc
     except json.JSONDecodeError as exc:
         raise ValueError(f"Invalid JSON in baseline {path}: {exc}") from exc
-    if not isinstance(data, dict) or data.get("version") != BASELINE_VERSION:
+    if not isinstance(data, dict):
         raise ValueError(f"Unsupported baseline format in {path}")
+    version = data.get("version")
+    if version != BASELINE_VERSION:
+        raise ValueError(
+            f"Unsupported baseline version {version!r} in {path};"
+            " regenerate it with --update-baseline"
+        )
 
-    def _set(key: str) -> frozenset[str]:
-        values = data.get(key, [])
-        if not isinstance(values, list) or not all(isinstance(v, str) for v in values):
-            raise ValueError(f"Baseline key {key!r} must be a list of strings")
-        return frozenset(values)
+    def _counts(key: str) -> dict[str, int]:
+        values = data.get(key, {})
+        if not isinstance(values, dict) or not all(
+            isinstance(k, str) and isinstance(v, int) and not isinstance(v, bool)
+            for k, v in values.items()
+        ):
+            raise ValueError(f"Baseline key {key!r} must map hashes to counts")
+        return dict(values)
 
-    return Baseline(exact=_set("exact"), near=_set("near"), blocks=_set("blocks"))
+    near = data.get("near", [])
+    if not isinstance(near, list) or not all(isinstance(v, str) for v in near):
+        raise ValueError("Baseline key 'near' must be a list of strings")
+    return Baseline(
+        exact=_counts("exact"), near=frozenset(near), blocks=_counts("blocks")
+    )
 
 
 def write_baseline(
@@ -55,9 +83,9 @@ def write_baseline(
 ) -> None:
     payload = {
         "version": BASELINE_VERSION,
-        "exact": sorted({g.hash for g in exact_rows}),
+        "exact": {g.hash: g.count for g in sorted(exact_rows, key=lambda g: g.hash)},
         "near": sorted({near_fingerprint(r) for r in near_rows}),
-        "blocks": sorted({g.hash for g in block_rows}),
+        "blocks": {g.hash: g.count for g in sorted(block_rows, key=lambda g: g.hash)},
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")

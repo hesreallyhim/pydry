@@ -6,7 +6,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .baseline import Baseline, load_baseline, near_fingerprint, write_baseline
+from .baseline import Baseline, load_baseline, write_baseline
 from .engine import (
     block_clones,
     exact_groups,
@@ -23,7 +23,7 @@ from .github import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Callable, Iterable
 
     from .config import CheckConfig
     from .models import (
@@ -137,11 +137,11 @@ def _limits(config: CheckConfig) -> dict[str, int | None]:
     }
 
 
-def _flagged(rows: list[Any], accepted: set[str], key: Any) -> list[dict[str, Any]]:
+def _flagged(rows: list[Any], accepted: Callable[[Any], bool]) -> list[dict[str, Any]]:
     out = []
     for row in rows:
         data = to_jsonable(row)
-        data["baselined"] = key(row) in accepted
+        data["baselined"] = accepted(row)
         out.append(data)
     return out
 
@@ -160,9 +160,10 @@ def _report_payload(
     baseline_path: Path | None,
     new_counts: dict[str, int],
 ) -> dict[str, Any]:
-    accepted_exact = set(baseline.exact) if baseline else set()
-    accepted_near = set(baseline.near) if baseline else set()
-    accepted_blocks = set(baseline.blocks) if baseline else set()
+    nothing: Callable[[Any], bool] = lambda row: False  # noqa: E731
+    accepted_exact = baseline.accepts_exact if baseline else nothing
+    accepted_near = baseline.accepts_near if baseline else nothing
+    accepted_blocks = baseline.accepts_block if baseline else nothing
     return {
         "root": str(root),
         "config": str(config_path) if config_path is not None else None,
@@ -202,14 +203,10 @@ def _report_payload(
                 "blocks": len(block_rows) > config.top_k,
             },
         },
-        "exact": _flagged(exact_rows, accepted_exact, lambda g: g.hash),
-        "near": _flagged(near_rows[: config.top_k], accepted_near, near_fingerprint),
-        "abstract": _flagged(
-            abstract_rows[: config.top_k], accepted_near, near_fingerprint
-        ),
-        "blocks": _flagged(
-            block_rows[: config.top_k], accepted_blocks, lambda g: g.hash
-        ),
+        "exact": _flagged(exact_rows, accepted_exact),
+        "near": _flagged(near_rows[: config.top_k], accepted_near),
+        "abstract": _flagged(abstract_rows[: config.top_k], accepted_near),
+        "blocks": _flagged(block_rows[: config.top_k], accepted_blocks),
     }
 
 
@@ -316,12 +313,10 @@ def run_check(
         baseline_path = None
 
     if baseline is not None:
-        new_exact = [g for g in exact_rows if g.hash not in baseline.exact]
-        new_near = [r for r in near_rows if near_fingerprint(r) not in baseline.near]
-        new_abstract = [
-            r for r in abstract_rows if near_fingerprint(r) not in baseline.near
-        ]
-        new_blocks = [g for g in block_rows if g.hash not in baseline.blocks]
+        new_exact = [g for g in exact_rows if not baseline.accepts_exact(g)]
+        new_near = [r for r in near_rows if not baseline.accepts_near(r)]
+        new_abstract = [r for r in abstract_rows if not baseline.accepts_near(r)]
+        new_blocks = [g for g in block_rows if not baseline.accepts_block(g)]
     else:
         new_exact, new_near, new_abstract, new_blocks = (
             exact_rows,

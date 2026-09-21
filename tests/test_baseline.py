@@ -114,6 +114,31 @@ class BaselineTests(unittest.TestCase):
         flags = sorted(group["baselined"] for group in payload["exact"])
         self.assertEqual(flags, [False, True])
 
+    def test_additional_copies_of_an_accepted_group_are_new_findings(self) -> None:
+        root = self._make_repo({"a.py": DUPLICATE, "b.py": OTHER})
+        baseline = root / ".pydry-baseline.json"
+        self._run(root, baseline_path=baseline, update_baseline=True)
+        (root / "c.py").write_text(textwrap.dedent(THIRD), encoding="utf-8")
+
+        code, stdout, _, payload = self._run(root, baseline_path=baseline)
+
+        self.assertEqual(code, 1)
+        self.assertIn("new: exact=1", stdout)
+        self.assertEqual(payload["summary"]["exact_group_count"], 1)
+        self.assertFalse(payload["exact"][0]["baselined"])
+        self.assertEqual(payload["exact"][0]["count"], 3)
+
+    def test_block_baseline_records_occurrence_counts(self) -> None:
+        from pydry.baseline import Baseline
+        from pydry.models import BlockCloneGroup, BlockOccurrence
+
+        occ = BlockOccurrence("a.py", 1, 6, "f", 0, 6)
+        two = BlockCloneGroup("h", 6, 2, [occ, occ], 6, "")
+        three = BlockCloneGroup("h", 6, 3, [occ, occ, occ], 12, "")
+        accepted = Baseline(exact={}, near=frozenset(), blocks={"h": 2})
+        self.assertTrue(accepted.accepts_block(two))
+        self.assertFalse(accepted.accepts_block(three))
+
     def test_missing_baseline_warns_and_evaluates_everything(self) -> None:
         root = self._make_repo({"a.py": DUPLICATE, "b.py": OTHER})
         code, _, stderr, payload = self._run(root, baseline_path=root / "absent.json")
@@ -127,7 +152,7 @@ class BaselineTests(unittest.TestCase):
         baseline.write_text('{"version": 99}', encoding="utf-8")
         code, _, stderr, _ = self._run(root, baseline_path=baseline)
         self.assertEqual(code, 2)
-        self.assertIn("Unsupported baseline format", stderr)
+        self.assertIn("Unsupported baseline version", stderr)
 
     def test_cli_wires_baseline_flags(self) -> None:
         root = self._make_repo({"a.py": DUPLICATE, "b.py": OTHER})
@@ -162,6 +187,18 @@ class BaselineTests(unittest.TestCase):
         self.assertEqual((first, second, third), (0, 0, 1))
 
 
+class ZeroThresholdTests(unittest.TestCase):
+    def test_combined_commands_accept_a_zero_threshold(self) -> None:
+        demo = Path(__file__).resolve().parent.parent / "demo"
+        stdout = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+            code = main(["report", str(demo), "--threshold", "0"])
+        self.assertEqual(code, 0)
+        self.assertGreater(
+            json.loads(stdout.getvalue())["results"]["summary"]["near_count"], 0
+        )
+
+
 class ProfileAndExclusionTests(unittest.TestCase):
     def _make_repo(self, files: dict[str, str]) -> Path:
         temporary = tempfile.TemporaryDirectory()
@@ -191,6 +228,16 @@ class ProfileAndExclusionTests(unittest.TestCase):
         strict = apply_overrides(CheckConfig(), profile="strict")
         self.assertEqual(strict.max_abstract_candidates, 0)
         self.assertEqual(strict.block_min_statements, 5)
+
+        # Switching profiles drops values inherited from the previous profile
+        # but keeps keys the user wrote explicitly.
+        switched = apply_overrides(config, profile="balanced")
+        self.assertEqual(switched.min_statements, 2)
+        self.assertEqual(switched.max_block_clones, 0)
+        self.assertEqual(switched.threshold, 0.9)
+        self.assertEqual(switched.profile, "balanced")
+        overridden = apply_overrides(config, profile="balanced", min_statements=3)
+        self.assertEqual(overridden.min_statements, 3)
 
         with self.assertRaises(ConfigError):
             apply_overrides(CheckConfig(), profile="unknown")
@@ -261,9 +308,19 @@ class BaselineFileTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Invalid JSON"):
                 load_baseline(bad_json)
             bad_key = Path(tmp) / "key.json"
-            bad_key.write_text('{"version": 1, "exact": "abc"}', encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "must be a list of strings"):
+            bad_key.write_text('{"version": 2, "exact": ["abc"]}', encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "must map hashes to counts"):
                 load_baseline(bad_key)
+            bad_near = Path(tmp) / "near.json"
+            bad_near.write_text('{"version": 2, "near": "abc"}', encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "must be a list of strings"):
+                load_baseline(bad_near)
+            legacy = Path(tmp) / "legacy.json"
+            legacy.write_text('{"version": 1, "exact": []}', encoding="utf-8")
+            with self.assertRaisesRegex(
+                ValueError, "regenerate it with --update-baseline"
+            ):
+                load_baseline(legacy)
 
     def test_update_baseline_write_failure_is_an_execution_error(self) -> None:
         import tempfile

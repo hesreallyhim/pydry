@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import tomllib
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +37,8 @@ class CheckConfig:
     fail_on_scan_errors: bool = True
     fail_on_plugin_errors: bool = True
     annotation_limit: int = 10
+    explicit: frozenset[str] = field(default=frozenset(), compare=False, repr=False)
+    """Keys that were written by the user rather than filled in by a profile."""
 
 
 PROFILES: dict[str, dict[str, object]] = {
@@ -45,20 +47,31 @@ PROFILES: dict[str, dict[str, object]] = {
         "min_statements": 2,
         "block_min_statements": 5,
         "max_exact_groups": 0,
-        "max_abstract_candidates": 0,
         "max_block_clones": 0,
+        "max_near_matches": None,
+        "max_abstract_candidates": 0,
     },
-    "balanced": {},
+    "balanced": {
+        "threshold": 0.8,
+        "min_statements": 2,
+        "block_min_statements": 6,
+        "max_exact_groups": 0,
+        "max_block_clones": 0,
+        "max_near_matches": None,
+        "max_abstract_candidates": None,
+    },
     "lenient": {
         "threshold": 0.85,
         "min_statements": 4,
         "block_min_statements": 8,
         "max_exact_groups": 0,
         "max_block_clones": None,
+        "max_near_matches": None,
+        "max_abstract_candidates": None,
     },
 }
 
-_CONFIG_KEYS = {field.name for field in fields(CheckConfig)}
+_CONFIG_KEYS = {field.name for field in fields(CheckConfig)} - {"explicit"}
 _BOOL_KEYS = {
     "top_level_only",
     "strict",
@@ -181,15 +194,25 @@ def apply_overrides(config: CheckConfig, **overrides: object) -> CheckConfig:
 
 
 def _merge(config: CheckConfig, values: dict[str, object]) -> CheckConfig:
-    """Apply a profile's defaults first, then the explicitly supplied keys."""
+    """Apply supplied keys over ``config``, switching profiles if requested.
+
+    Switching profiles rebuilds the configuration from the built-in defaults
+    and the new profile, then reapplies every key the user set explicitly
+    (in the file or on the command line), so profile-controlled values that
+    were only inherited from the previous profile do not leak through.
+    """
 
     profile = values.get("profile", config.profile)
     if not isinstance(profile, str) or profile not in PROFILES:
         names = ", ".join(sorted(PROFILES))
         raise ConfigError(f"profile must be one of: {names}")
-    merged = (
-        replace(config, **PROFILES[profile])  # type: ignore[arg-type]
-        if "profile" in values
-        else config
-    )
-    return replace(merged, **values)  # type: ignore[arg-type]
+    explicit = config.explicit | (frozenset(values) - {"profile"})
+    if "profile" in values:
+        carried = {
+            key: getattr(config, key) for key in config.explicit if key != "profile"
+        }
+        base = replace(CheckConfig(), **PROFILES[profile])  # type: ignore[arg-type]
+        merged = replace(base, **carried)
+    else:
+        merged = config
+    return replace(merged, **values, explicit=explicit)  # type: ignore[arg-type]

@@ -69,6 +69,19 @@ def _maximal_run(
     return start_a, start_b, length
 
 
+def _covered_by_near_match(
+    ta: list[StmtToken],
+    start_a: int,
+    tb: list[StmtToken],
+    start_b: int,
+    length: int,
+    threshold: float,
+) -> bool:
+    if threshold <= 0.0 or ta[start_a].depth != tb[start_b].depth:
+        return False
+    return length >= threshold * len(ta) and length >= threshold * len(tb)
+
+
 def block_clones(
     root: Path,
     *,
@@ -88,10 +101,13 @@ def block_clones(
     extended in both directions to a maximal run, and runs are grouped by
     content. Nested runs already inside a longer reported run are dropped.
 
-    A run covering at least ``near_threshold`` of both functions implies a
-    near-match similarity of at least that value, so such runs are left to
-    the near-match report. Callers that combine the two reports should pass
-    the same threshold they use for near matches.
+    A run that starts at the same nesting depth in both functions and covers
+    at least ``near_threshold`` of each implies a near-match similarity of at
+    least that value, so such runs are left to the near-match report. Runs
+    at different depths (the same statements once inside an ``if``) are kept,
+    because near matching compares absolute depth and would not align them.
+    Callers that combine the two reports should pass the same threshold they
+    use for near matches; ``0`` disables the rule.
 
     When one window hashes the same in more than ``_MAX_BUCKET_PAIRS``
     places, each occurrence is only extended against the first one instead
@@ -104,8 +120,8 @@ def block_clones(
     if min_statements < 2:
         msg = "min_statements must be >= 2"
         raise ValueError(msg)
-    if not 0.0 < near_threshold <= 1.0:
-        msg = "near_threshold must be between 0 (exclusive) and 1"
+    if not 0.0 <= near_threshold <= 1.0:
+        msg = "near_threshold must be between 0 and 1"
         raise ValueError(msg)
     items = resolve_profiles(
         root,
@@ -154,9 +170,7 @@ def block_clones(
             if length < k or (pa, start_a, pb, start_b) in seen:
                 continue
             seen.add((pa, start_a, pb, start_b))
-            if length >= near_threshold * len(ta) and length >= near_threshold * len(
-                tb
-            ):
+            if _covered_by_near_match(ta, start_a, tb, start_b, length, near_threshold):
                 continue
             segment = ta[start_a : start_a + length]
             if sum(token.weight for token in segment) == 0:

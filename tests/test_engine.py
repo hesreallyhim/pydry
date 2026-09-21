@@ -647,8 +647,43 @@ class BlockDetectionEdgeTests(RepoMixin, unittest.TestCase):
         self.assertEqual(block_clones(root, min_statements=5, near_threshold=0.8), [])
         kept = block_clones(root, min_statements=5, near_threshold=0.9)
         self.assertEqual([g.stmt_count for g in kept], [7])
+        # Zero disables the rule: the whole-function run is reported as a block.
+        self.assertEqual(
+            [
+                g.stmt_count
+                for g in block_clones(root, min_statements=5, near_threshold=0.0)
+            ],
+            [7],
+        )
         with self.assertRaises(ValueError):
-            block_clones(root, near_threshold=0.0)
+            block_clones(root, near_threshold=1.5)
+
+    def test_runs_at_different_depths_are_not_left_to_near_matches(self) -> None:
+        # The same six calls, once at the top level and once under an ``if``.
+        # Near matching compares absolute depth and will not align them, so
+        # the block must survive the coverage rule.
+        body = """
+        def flat(x):
+            a = prep(x)
+            b = prep(a)
+            c = prep(b)
+            log(c)
+            store(c)
+            emit(c)
+
+        def guarded(x):
+            if x:
+                a = prep(x)
+                b = prep(a)
+                c = prep(b)
+                log(c)
+                store(c)
+                emit(c)
+        """
+        root = self._make_repo({"a.py": body})
+        self.assertEqual(near_matches(root, threshold=0.8), [])
+        groups = block_clones(root, min_statements=6, near_threshold=0.8)
+        self.assertEqual([g.stmt_count for g in groups], [6])
 
     def test_bucket_cap_extends_against_the_first_occurrence_only(self) -> None:
         from pydry import blocks

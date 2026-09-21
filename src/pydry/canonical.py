@@ -268,7 +268,7 @@ def _walk(
         if isinstance(stmt, _SCOPE_NODES):
             # Nested scopes are profiled as functions in their own right.
             continue
-        if isinstance(stmt, ast.Try):
+        if isinstance(stmt, (ast.Try, ast.TryStar)):
             yield from _walk(stmt.body, depth + 1, bound)
             for handler in stmt.handlers:
                 handler_token = _token_for(handler, depth, bound)  # type: ignore[arg-type]

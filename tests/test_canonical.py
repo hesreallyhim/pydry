@@ -292,6 +292,31 @@ class StructuralCoverageTests(unittest.TestCase):
             ],
         )
 
+    def test_except_star_handlers_and_cleanup_are_traversed(self) -> None:
+        fn = _func(
+            """
+            def f():
+                try:
+                    run()
+                except* ValueError as group:
+                    recover(group)
+                finally:
+                    cleanup()
+            """
+        )
+        kinds = [(t.depth, t.kind) for t in statement_tokens(fn)]
+        self.assertEqual(
+            kinds,
+            [
+                (0, "TryStar"),
+                (1, "Expr"),
+                (0, "ExceptHandler"),
+                (1, "Expr"),
+                (0, "Finally"),
+                (1, "Expr"),
+            ],
+        )
+
     def test_nested_class_and_async_def_contribute_headers_only(self) -> None:
         fn = _func(
             """
