@@ -10,9 +10,11 @@
       "extra-files": [
         {
           "type": "generic",
-          "path": "src/pydry/__init__.py"
+          "path": "src/pydry/_version.py"
         }
       ]
     }
-  }
+  },
+  "bump-minor-pre-major": true,
+  "bump-patch-for-minor-pre-major": false
 }

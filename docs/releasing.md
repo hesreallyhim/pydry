@@ -36,4 +36,4 @@ Release Please remains the source of version tags and GitHub releases.
 
 ## Version sources
 
-Release Please updates `[project].version` in `pyproject.toml`, creates `CHANGELOG.md`, and keeps `pydry.__version__` synchronized through the release annotation in `src/pydry/__init__.py`. The manifest in `.github/.release-please-manifest.json` records the most recently released version; it should not be manually advanced to an unreleased source version.
+Release Please updates `[project].version` in `pyproject.toml`, creates `CHANGELOG.md`, and keeps `pydry.__version__` synchronized through the release annotation in `src/pydry/_version.py`. The manifest in `.github/.release-please-manifest.json` records the most recently released version; it should not be manually advanced to an unreleased source version.

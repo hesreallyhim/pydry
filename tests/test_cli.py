@@ -835,3 +835,14 @@ class CliCoverageTests(unittest.TestCase):
             rc = main(["showcase", str(root)])
         self.assertEqual(rc, 0)
         self.assertIn("statements x2, saves ~", stdout.getvalue())
+
+
+class VersionFlagTests(unittest.TestCase):
+    def test_version_flag_reports_package_version(self) -> None:
+        from pydry import __version__
+
+        stdout = io.StringIO()
+        with redirect_stdout(stdout), self.assertRaises(SystemExit) as raised:
+            main(["--version"])
+        self.assertEqual(raised.exception.code, 0)
+        self.assertEqual(stdout.getvalue().strip(), f"pydry {__version__}")

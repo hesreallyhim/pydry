@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ._version import __version__
 from .check import run_check
 from .config import (
     CONFIG_FILENAME,
@@ -353,6 +354,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "AST-based duplicate and structural similarity detector for Python."
         ),
     )
+    ap.add_argument("--version", action="version", version=f"pydry {__version__}")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     def analysis_parser(name: str, help_text: str) -> argparse.ArgumentParser:
