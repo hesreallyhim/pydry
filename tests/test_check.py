@@ -10,14 +10,9 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from pydry.check import (
-    PolicyViolation,
-    _annotation,
-    _finding_annotations,
-    evaluate_policy,
-    run_check,
-)
+from pydry.check import PolicyViolation, evaluate_policy, run_check
 from pydry.config import CheckConfig
+from pydry.github import annotation, finding_annotations
 from pydry.models import ExactGroup, FunctionOccurrence
 
 
@@ -276,7 +271,7 @@ class CheckCommandTests(unittest.TestCase):
         stdout = io.StringIO()
 
         with redirect_stdout(stdout):
-            _annotation(
+            annotation(
                 "error",
                 "bad%message\r\nnext",
                 occurrence,
@@ -308,7 +303,7 @@ class CheckCommandTests(unittest.TestCase):
         stdout = io.StringIO()
 
         with redirect_stdout(stdout):
-            emitted = _finding_annotations(
+            emitted = finding_annotations(
                 config=CheckConfig(annotation_limit=1),
                 violations=[violation],
                 exact_rows=[exact],

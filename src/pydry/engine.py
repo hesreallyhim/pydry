@@ -1,25 +1,15 @@
 from __future__ import annotations
 
-import ast
-import hashlib
 import math
 from collections import Counter, defaultdict
 from dataclasses import asdict
 from typing import TYPE_CHECKING, Any
 
 from . import builtin_plugins  # noqa: F401
-from .analyze import (
-    FunctionProfile,
-    _counter_jaccard,
-    canonicalize,
-    iter_functions,
-    iter_python_files,
-    profile_function,
-)
+from .analyze import FunctionProfile, _counter_jaccard, canonicalize
+from .blocks import DEFAULT_BLOCK_MIN_STATEMENTS, block_clones, suppress_covered_blocks
 from .canonical import bag_upper_bound, lcs_alignment, sequence_similarity
 from .models import (
-    BlockCloneGroup,
-    BlockOccurrence,
     ExactGroup,
     FunctionOccurrence,
     NearCluster,
@@ -27,6 +17,16 @@ from .models import (
     SimilarityResult,
 )
 from .plugins import PairContext, PluginContext, apply_pair_plugins
+from .scan import (
+    DEFAULT_EXACT_OPTS,
+    DEFAULT_MIN_STATEMENTS,
+    DEFAULT_THRESHOLD,
+    TIER_OPTS,
+    resolve_profiles,
+    scan_functions,
+    sha,
+    tier_hash,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
@@ -34,93 +34,21 @@ if TYPE_CHECKING:
 
     from .canonical import StmtToken
 
-DEFAULT_THRESHOLD = 0.8
-DEFAULT_MIN_STATEMENTS = 2
-DEFAULT_BLOCK_MIN_STATEMENTS = 6
 _SortKey = tuple[float, float, str, int, str, int]
 
-DEFAULT_EXACT_OPTS = dict(
-    strip_docstrings=True,
-    strip_decorators=True,
-    normalize_arg_names=True,
-    strip_annotations=True,
-    normalize_local_names=False,
-    normalize_constants=False,
-    preserve_function_name=False,
-)
-
-_TIER_OPTS: dict[str, dict[str, bool]] = {
-    "identical": {"normalize_local_names": False, "normalize_constants": False},
-    "renamed": {"normalize_local_names": True, "normalize_constants": False},
-    "constants": {"normalize_local_names": True, "normalize_constants": True},
-}
-
-
-def _sha(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
-def _tier_hash(profile: FunctionProfile, tier: str) -> str:
-    cached = profile._hashes.get(tier)
-    if cached is None:
-        opts = {**DEFAULT_EXACT_OPTS, **_TIER_OPTS[tier]}
-        cached = _sha(canonicalize(profile.node, **opts))
-        profile._hashes[tier] = cached
-    return cached
-
-
-# ── Scanning ─────────────────────────────────────────────────
-
-
-def scan_functions(
-    root: Path,
-    *,
-    top_level_only: bool = False,
-    strict: bool = False,
-    scan_errors: list[str] | None = None,
-    exclude: Sequence[str] = (),
-) -> list[FunctionProfile]:
-    """Parse every Python file under ``root`` and profile each function."""
-
-    out: list[FunctionProfile] = []
-    for path in iter_python_files(root, exclude=exclude):
-        try:
-            module = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        except Exception as exc:
-            msg = f"{path}: {type(exc).__name__}: {exc}"
-            if strict:
-                strict_msg = f"Failed to parse/read {path}: {type(exc).__name__}: {exc}"
-                raise RuntimeError(strict_msg) from exc
-            if scan_errors is not None:
-                scan_errors.append(msg)
-            continue
-        for fn, parents, is_method_flag in iter_functions(
-            module, top_level_only=top_level_only
-        ):
-            out.append(
-                profile_function(path, fn, parents, is_method_flag=is_method_flag)
-            )
-    return out
-
-
-def _resolve_profiles(
-    root: Path,
-    profiles: list[FunctionProfile] | None,
-    *,
-    top_level_only: bool,
-    strict: bool,
-    scan_errors: list[str] | None,
-    exclude: Sequence[str],
-) -> list[FunctionProfile]:
-    if profiles is not None:
-        return profiles
-    return scan_functions(
-        root,
-        top_level_only=top_level_only,
-        strict=strict,
-        scan_errors=scan_errors,
-        exclude=exclude,
-    )
+__all__ = [
+    "DEFAULT_BLOCK_MIN_STATEMENTS",
+    "DEFAULT_MIN_STATEMENTS",
+    "DEFAULT_THRESHOLD",
+    "abstract_candidates",
+    "block_clones",
+    "cluster_near_matches",
+    "exact_groups",
+    "near_matches",
+    "scan_functions",
+    "suppress_covered_blocks",
+    "to_jsonable",
+]
 
 
 # ── Exact groups ─────────────────────────────────────────────
@@ -146,7 +74,7 @@ def exact_groups(
     if min_count < 2:
         msg = "min_count must be >= 2"
         raise ValueError(msg)
-    items = _resolve_profiles(
+    items = resolve_profiles(
         root,
         profiles,
         top_level_only=top_level_only,
@@ -163,15 +91,15 @@ def exact_groups(
         }
     elif normalize_constants:
         tier = "constants"
-        opts = {**DEFAULT_EXACT_OPTS, **_TIER_OPTS["constants"]}
+        opts = {**DEFAULT_EXACT_OPTS, **TIER_OPTS["constants"]}
     elif normalize_local_names:
         tier = "renamed"
-        opts = {**DEFAULT_EXACT_OPTS, **_TIER_OPTS["renamed"]}
+        opts = {**DEFAULT_EXACT_OPTS, **TIER_OPTS["renamed"]}
     else:
         tier = "identical"
-        opts = {**DEFAULT_EXACT_OPTS, **_TIER_OPTS["identical"]}
+        opts = {**DEFAULT_EXACT_OPTS, **TIER_OPTS["identical"]}
 
-    cacheable = opts == {**DEFAULT_EXACT_OPTS, **_TIER_OPTS[tier]}
+    cacheable = opts == {**DEFAULT_EXACT_OPTS, **TIER_OPTS[tier]}
     groups: dict[str, list[FunctionProfile]] = defaultdict(list)
     canonical_by_hash: dict[str, str] = {}
     for profile in items:
@@ -180,10 +108,10 @@ def exact_groups(
         ):
             continue
         if cacheable and not include_canonical:
-            h = _tier_hash(profile, tier)
+            h = tier_hash(profile, tier)
         else:
             canonical = canonicalize(profile.node, **opts)
-            h = _sha(canonical)
+            h = sha(canonical)
             if include_canonical and h not in canonical_by_hash:
                 canonical_by_hash[h] = canonical
         groups[h].append(profile)
@@ -222,7 +150,7 @@ def _resolve_tier(members: list[FunctionProfile], requested: str) -> str:
     for tier in ("identical", "renamed"):
         if requested == tier:
             return tier
-        hashes = {_tier_hash(p, tier) for p in members}
+        hashes = {tier_hash(p, tier) for p in members}
         if len(hashes) == 1:
             return tier
     return requested
@@ -462,7 +390,7 @@ def _compare(
 def pair_fingerprint(a: FunctionProfile, b: FunctionProfile) -> str:
     """Order-independent content identity of a pair, used by baselines."""
 
-    return "|".join(sorted((_tier_hash(a, "constants"), _tier_hash(b, "constants"))))
+    return "|".join(sorted((tier_hash(a, "constants"), tier_hash(b, "constants"))))
 
 
 def near_matches(
@@ -495,7 +423,7 @@ def near_matches(
         msg = "top_k must be >= 0"
         raise ValueError(msg)
 
-    items = _resolve_profiles(
+    items = resolve_profiles(
         root,
         profiles,
         top_level_only=top_level_only,
@@ -514,7 +442,7 @@ def near_matches(
             min_statements=min_statements, ignore_trivial=ignore_trivial
         ):
             continue
-        representatives.setdefault(_tier_hash(profile, "constants"), profile)
+        representatives.setdefault(tier_hash(profile, "constants"), profile)
     candidates = sorted(representatives.values(), key=lambda p: p.stmt_count)
 
     out: list[SimilarityResult] = []
@@ -669,179 +597,6 @@ def abstract_candidates(
     if top_k is not None:
         rows = rows[:top_k]
     return rows
-
-
-# ── Block clones ─────────────────────────────────────────────
-
-_MAX_BUCKET_PAIRS = 40
-
-
-def _run_hash(tokens: list[StmtToken], start: int, length: int) -> str:
-    base = tokens[start].depth
-    body = "\n".join(
-        f"{token.depth - base}:{token.full}" for token in tokens[start : start + length]
-    )
-    return _sha(body)
-
-
-def _same_token(ta: StmtToken, tb: StmtToken, base_a: int, base_b: int) -> bool:
-    return ta.depth - base_a == tb.depth - base_b and ta.full == tb.full
-
-
-def _run_summary(tokens: list[StmtToken]) -> str:
-    kinds = Counter(token.kind for token in tokens)
-    return ", ".join(f"{kind} x{count}" for kind, count in kinds.most_common(4))
-
-
-def block_clones(
-    root: Path,
-    *,
-    min_statements: int = DEFAULT_BLOCK_MIN_STATEMENTS,
-    top_level_only: bool = False,
-    strict: bool = False,
-    scan_errors: list[str] | None = None,
-    exclude: Sequence[str] = (),
-    profiles: list[FunctionProfile] | None = None,
-) -> list[BlockCloneGroup]:
-    """Find runs of ``min_statements`` or more statements repeated verbatim.
-
-    Runs are compared on the fully normalized statement form, so renamed
-    locals and changed constants still match. Runs that cover most of both
-    functions are left to the exact and near-match reports.
-    """
-
-    if min_statements < 2:
-        msg = "min_statements must be >= 2"
-        raise ValueError(msg)
-    items = _resolve_profiles(
-        root,
-        profiles,
-        top_level_only=top_level_only,
-        strict=strict,
-        scan_errors=scan_errors,
-        exclude=exclude,
-    )
-    items = sorted(
-        (p for p in items if p.stmt_count >= min_statements),
-        key=lambda p: (p.occurrence.path, p.occurrence.lineno),
-    )
-    k = min_statements
-
-    buckets: dict[str, list[tuple[int, int]]] = defaultdict(list)
-    for index, profile in enumerate(items):
-        tokens = profile.tokens
-        for start in range(len(tokens) - k + 1):
-            buckets[_run_hash(tokens, start, k)].append((index, start))
-
-    runs: dict[str, dict[tuple[int, int, int], None]] = defaultdict(dict)
-    run_tokens: dict[str, list[StmtToken]] = {}
-    for entries in buckets.values():
-        if len(entries) < 2:
-            continue
-        if len(entries) > _MAX_BUCKET_PAIRS:
-            pairs = [(entries[0], other) for other in entries[1:]]
-        else:
-            pairs = [
-                (entries[x], entries[y])
-                for x in range(len(entries))
-                for y in range(x + 1, len(entries))
-            ]
-        for (pa, ia), (pb, ib) in pairs:
-            a, b = items[pa], items[pb]
-            if pa == pb and abs(ia - ib) < k:
-                continue
-            if pa != pb and _tier_hash(a, "constants") == _tier_hash(b, "constants"):
-                continue
-            ta, tb = a.tokens, b.tokens
-            base_a, base_b = ta[ia].depth, tb[ib].depth
-            if (
-                ia > 0
-                and ib > 0
-                and _same_token(ta[ia - 1], tb[ib - 1], base_a, base_b)
-            ):
-                continue  # not maximal; the run starting earlier covers this
-            length = k
-            limit = min(len(ta) - ia, len(tb) - ib)
-            if pa == pb:
-                limit = min(limit, abs(ia - ib))
-            while length < limit and _same_token(
-                ta[ia + length], tb[ib + length], base_a, base_b
-            ):
-                length += 1
-            if length >= 0.8 * len(ta) and length >= 0.8 * len(tb):
-                continue
-            segment = ta[ia : ia + length]
-            if sum(token.weight for token in segment) == 0:
-                continue
-            content = _run_hash(ta, ia, length)
-            runs[content][(pa, ia, ia + length)] = None
-            runs[content][(pb, ib, ib + length)] = None
-            run_tokens.setdefault(content, segment)
-
-    groups: list[BlockCloneGroup] = []
-    covered: dict[int, list[tuple[int, int]]] = defaultdict(list)
-    ordered = sorted(
-        runs.items(), key=lambda item: (-len(run_tokens[item[0]]), item[0])
-    )
-    for content, spans in ordered:
-        span_list = sorted(spans)
-        if all(
-            any(start >= s and end <= e for s, e in covered[index])
-            for index, start, end in span_list
-        ):
-            continue
-        for index, start, end in span_list:
-            covered[index].append((start, end))
-        occurrences = []
-        for index, start, end in span_list:
-            profile = items[index]
-            segment = profile.tokens[start:end]
-            occurrences.append(
-                BlockOccurrence(
-                    path=profile.occurrence.path,
-                    lineno=segment[0].lineno,
-                    end_lineno=max(token.end_lineno for token in segment),
-                    qualname=profile.occurrence.qualname,
-                    start_index=start,
-                    end_index=end,
-                )
-            )
-        stmt_count = len(run_tokens[content])
-        groups.append(
-            BlockCloneGroup(
-                hash=content,
-                stmt_count=stmt_count,
-                count=len(occurrences),
-                occurrences=occurrences,
-                savings=stmt_count * (len(occurrences) - 1),
-                summary=_run_summary(run_tokens[content]),
-            )
-        )
-    groups.sort(key=lambda g: (-g.savings, -g.count, g.hash))
-    return groups
-
-
-def suppress_covered_blocks(
-    blocks: list[BlockCloneGroup], near_rows: list[SimilarityResult]
-) -> list[BlockCloneGroup]:
-    """Drop repeated blocks whose functions are already reported as near matches.
-
-    A block shared by exactly the functions of a near-match pair adds no
-    information beyond that pair, so combined reports hide it.
-    """
-
-    paired: set[frozenset[tuple[str, str]]] = set()
-    for row in near_rows:
-        paired.add(
-            frozenset({(row.a.path, row.a.qualname), (row.b.path, row.b.qualname)})
-        )
-    kept = []
-    for block in blocks:
-        functions = {(occ.path, occ.qualname) for occ in block.occurrences}
-        if len(functions) == 2 and frozenset(functions) in paired:
-            continue
-        kept.append(block)
-    return kept
 
 
 # ── Serialization ────────────────────────────────────────────

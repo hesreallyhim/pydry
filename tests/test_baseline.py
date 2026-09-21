@@ -10,7 +10,8 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
-from pydry.check import load_baseline, run_check
+from pydry.baseline import load_baseline
+from pydry.check import run_check
 from pydry.cli import main
 from pydry.config import CheckConfig, ConfigError, apply_overrides, load_check_config
 

@@ -186,6 +186,15 @@ The scores are heuristics: a high similarity means two functions look alike stru
 
 Defaults are tuned against the standard library, which is well maintained and where most whole-function similarity is idiomatic rather than a copy. The benchmark script and its current numbers are in [docs/benchmarks.md](docs/benchmarks.md); run `make benchmark` to reproduce.
 
+## Migrating from 0.0.x
+
+The 0.1 engine changes defaults and the JSON schema:
+
+- `pydry exact` now normalizes local names and constants by default. Pass `--no-normalize-local-names` or `--no-normalize-constants` for the old behavior, and the same keyword arguments to `exact_groups()`.
+- Functions with fewer than two statements and trivial bodies (stubs, accessors, call-free boilerplate) are skipped by default. Use `--min-statements 1 --no-ignore-trivial` to include them.
+- Near-match evidence is now alignment counts (`shared_statements`, `only_in_a`, `constant_statements`, and so on). The `shape_similarity`, `stmt_similarity`, `signature_similarity`, `wrapper_score`, and `curry_score` fields, the `wrapper` and `partial_application` labels, and `abstract_template` are gone. Results gain `priority`, `shared_statements`, and `cluster_id`.
+- Reports and `check` output gain a `blocks` section, and the check policy gains `max_block_clones`, which defaults to `0`. `max_abstract_candidates` now defaults to unenforced; set `profile = "strict"` to restore the old ceiling of `0`.
+
 ## Python API
 
 The core functions are importable:

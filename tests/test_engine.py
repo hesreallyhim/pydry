@@ -552,3 +552,163 @@ class ScanTests(RepoMixin, unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BlockDetectionEdgeTests(RepoMixin, unittest.TestCase):
+    """Bucket cap, runs across compound boundaries, and coverage suppression."""
+
+    def test_seed_in_the_middle_extends_backwards_to_the_maximal_run(self) -> None:
+        # Both functions share an 8-statement run; every 6-window inside it
+        # seeds the same maximal run, which must be reported exactly once.
+        body = """
+        def one(a):
+            x = prep(a)
+            y = prep(x)
+            z = prep(y)
+            if z:
+                log(z)
+                store(z)
+            w = wrap(z)
+            emit(w)
+            return w
+
+        def two(b):
+            b = warm(b)
+            x = prep(b)
+            y = prep(x)
+            z = prep(y)
+            if z:
+                log(z)
+                store(z)
+            w = wrap(z)
+            emit(w)
+            return finish(w)
+        """
+        root = self._make_repo({"a.py": body})
+        groups = block_clones(root, min_statements=6, near_threshold=0.95)
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0].stmt_count, 8)
+        starts = sorted(o.start_index for o in groups[0].occurrences)
+        self.assertEqual(starts, [0, 1])
+
+    def test_run_can_cross_a_compound_statement_boundary(self) -> None:
+        body = """
+        def first(items):
+            for item in items:
+                check(item)
+                tally(item)
+            flush()
+            report()
+            close()
+            return done()
+
+        def second(rows):
+            setup()
+            for row in rows:
+                check(row)
+                tally(row)
+            flush()
+            report()
+            close()
+            return other()
+        """
+        root = self._make_repo({"a.py": body})
+        groups = block_clones(root, min_statements=6, near_threshold=0.95)
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0].stmt_count, 6)
+        first = next(o for o in groups[0].occurrences if o.qualname == "first")
+        self.assertEqual((first.start_index, first.end_index), (0, 6))
+        self.assertEqual((first.lineno, first.end_lineno), (3, 8))
+
+    def test_coverage_rule_follows_the_near_threshold(self) -> None:
+        # 7 of 8 statements shared: coverage 0.875 on both sides.
+        body = """
+        def alpha(a):
+            x = prep(a)
+            y = prep(x)
+            z = prep(y)
+            log(z)
+            store(z)
+            w = wrap(z)
+            emit(w)
+            return w
+
+        def beta(b):
+            x = prep(b)
+            y = prep(x)
+            z = prep(y)
+            log(z)
+            store(z)
+            w = wrap(z)
+            emit(w)
+            return finish(w)
+        """
+        root = self._make_repo({"a.py": body})
+        self.assertEqual(block_clones(root, min_statements=5, near_threshold=0.8), [])
+        kept = block_clones(root, min_statements=5, near_threshold=0.9)
+        self.assertEqual([g.stmt_count for g in kept], [7])
+        with self.assertRaises(ValueError):
+            block_clones(root, near_threshold=0.0)
+
+    def test_bucket_cap_extends_against_the_first_occurrence_only(self) -> None:
+        from pydry import blocks
+
+        template = """
+        def fn{n}(a):
+            x = prep(a)
+            y = prep(x)
+            z = prep(y)
+            log(z)
+            store(z)
+            emit(z)
+            {tail}
+        """
+        files = {}
+        for n in range(6):
+            tail = "return z" if n < 3 else "return finish(z)\n    return z"
+            files[f"m{n}.py"] = template.format(n=n, tail=tail)
+        root = self._make_repo(files)
+        original = blocks._MAX_BUCKET_PAIRS
+        blocks._MAX_BUCKET_PAIRS = 2
+        try:
+            capped = block_clones(root, min_statements=6, near_threshold=1.0)
+        finally:
+            blocks._MAX_BUCKET_PAIRS = original
+        full = block_clones(root, min_statements=6, near_threshold=1.0)
+        # Every occurrence is still reported under the cap; only the grouping
+        # by maximal run may differ from the pairwise result.
+        capped_occurrences = {
+            (o.qualname, o.start_index) for g in capped for o in g.occurrences
+        }
+        full_occurrences = {
+            (o.qualname, o.start_index) for g in full for o in g.occurrences
+        }
+        self.assertEqual(capped_occurrences, full_occurrences)
+        self.assertGreaterEqual(len(capped), len(full))
+
+    def test_suppress_covered_blocks_only_hides_two_function_blocks(self) -> None:
+        from pydry.engine import suppress_covered_blocks
+        from pydry.models import BlockCloneGroup, BlockOccurrence
+
+        def occ(path: str, name: str) -> BlockOccurrence:
+            return BlockOccurrence(path, 1, 5, name, 0, 5)
+
+        pair_block = BlockCloneGroup(
+            "h1", 5, 2, [occ("a.py", "f"), occ("b.py", "g")], 5, ""
+        )
+        triple_block = BlockCloneGroup(
+            "h2", 5, 3, [occ("a.py", "f"), occ("b.py", "g"), occ("c.py", "h")], 10, ""
+        )
+        other_block = BlockCloneGroup(
+            "h3", 5, 2, [occ("a.py", "f"), occ("c.py", "h")], 5, ""
+        )
+        root = self._make_repo({"a.py": LOADER_A, "b.py": LOADER_B})
+        near = near_matches(root, threshold=0.7)
+        near[0].a = near[0].a.__class__(
+            **{**near[0].a.__dict__, "path": "a.py", "qualname": "f"}
+        )
+        near[0].b = near[0].b.__class__(
+            **{**near[0].b.__dict__, "path": "b.py", "qualname": "g"}
+        )
+        kept = suppress_covered_blocks([pair_block, triple_block, other_block], near)
+        self.assertEqual([g.hash for g in kept], ["h2", "h3"])

@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import json
-import os
-import shlex
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .baseline import Baseline, load_baseline, near_fingerprint, write_baseline
 from .engine import (
     block_clones,
     exact_groups,
@@ -16,6 +15,12 @@ from .engine import (
     suppress_covered_blocks,
     to_jsonable,
 )
+from .github import (
+    annotation,
+    finding_annotations,
+    write_github_outputs,
+    write_github_summary,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -23,13 +28,9 @@ if TYPE_CHECKING:
     from .config import CheckConfig
     from .models import (
         BlockCloneGroup,
-        BlockOccurrence,
         ExactGroup,
-        FunctionOccurrence,
         SimilarityResult,
     )
-
-BASELINE_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -38,15 +39,6 @@ class PolicyViolation:
     actual: int
     allowed: int
     message: str
-
-
-@dataclass(frozen=True)
-class Baseline:
-    """Fingerprints of findings that a repository has chosen to accept."""
-
-    exact: frozenset[str]
-    near: frozenset[str]
-    blocks: frozenset[str]
 
 
 def _dedupe(messages: Iterable[str]) -> list[str]:
@@ -122,49 +114,6 @@ def evaluate_policy(
             )
         )
     return resolved
-
-
-# ── Baselines ────────────────────────────────────────────────
-
-
-def near_fingerprint(row: SimilarityResult) -> str:
-    return str(row.metadata.get("fingerprint", ""))
-
-
-def load_baseline(path: Path) -> Baseline:
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except OSError as exc:
-        raise ValueError(f"Could not read baseline {path}: {exc}") from exc
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Invalid JSON in baseline {path}: {exc}") from exc
-    if not isinstance(data, dict) or data.get("version") != BASELINE_VERSION:
-        raise ValueError(f"Unsupported baseline format in {path}")
-
-    def _set(key: str) -> frozenset[str]:
-        values = data.get(key, [])
-        if not isinstance(values, list) or not all(isinstance(v, str) for v in values):
-            raise ValueError(f"Baseline key {key!r} must be a list of strings")
-        return frozenset(values)
-
-    return Baseline(exact=_set("exact"), near=_set("near"), blocks=_set("blocks"))
-
-
-def write_baseline(
-    path: Path,
-    *,
-    exact_rows: list[ExactGroup],
-    near_rows: list[SimilarityResult],
-    block_rows: list[BlockCloneGroup],
-) -> None:
-    payload = {
-        "version": BASELINE_VERSION,
-        "exact": sorted({g.hash for g in exact_rows}),
-        "near": sorted({near_fingerprint(r) for r in near_rows}),
-        "blocks": sorted({g.hash for g in block_rows}),
-    }
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
 # ── Report payload ───────────────────────────────────────────
@@ -264,225 +213,6 @@ def _report_payload(
     }
 
 
-# ── GitHub rendering ─────────────────────────────────────────
-
-
-def _escape_command(value: object, *, property_value: bool = False) -> str:
-    escaped = str(value).replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
-    if property_value:
-        escaped = escaped.replace(":", "%3A").replace(",", "%2C")
-    return escaped
-
-
-def _annotation(
-    level: str,
-    message: str,
-    occurrence: FunctionOccurrence | BlockOccurrence | None = None,
-    *,
-    title: str = "pydry",
-) -> None:
-    properties = [f"title={_escape_command(title, property_value=True)}"]
-    if occurrence is not None:
-        properties.extend(
-            [
-                f"file={_escape_command(occurrence.path, property_value=True)}",
-                f"line={occurrence.lineno}",
-            ]
-        )
-        col_offset = getattr(occurrence, "col_offset", None)
-        if col_offset is not None:
-            properties.append(f"col={col_offset + 1}")
-        if occurrence.end_lineno is not None:
-            properties.append(f"endLine={occurrence.end_lineno}")
-    print(f"::{level} {','.join(properties)}::{_escape_command(message)}")
-
-
-def _finding_annotations(
-    *,
-    config: CheckConfig,
-    violations: list[PolicyViolation],
-    exact_rows: list[ExactGroup],
-    near_rows: list[SimilarityResult],
-    abstract_rows: list[SimilarityResult],
-    block_rows: list[BlockCloneGroup] | None = None,
-) -> int:
-    failing = {violation.category for violation in violations}
-    emitted = 0
-
-    def emit(message: str, occurrence: FunctionOccurrence | BlockOccurrence) -> None:
-        nonlocal emitted
-        if emitted < config.annotation_limit:
-            _annotation("error", message, occurrence)
-            emitted += 1
-
-    if "exact_groups" in failing:
-        for group in exact_rows:
-            names = ", ".join(item.qualname for item in group.occurrences)
-            for occurrence in group.occurrences:
-                emit(
-                    f"Exact duplicate group ({group.count} occurrences, {group.tier}):"
-                    f" {names}",
-                    occurrence,
-                )
-    if "block_clones" in failing:
-        for block in block_rows or []:
-            places = ", ".join(
-                f"{item.qualname} ({item.path}:{item.lineno})"
-                for item in block.occurrences
-            )
-            for block_occurrence in block.occurrences:
-                emit(
-                    f"Repeated block of {block.stmt_count} statements"
-                    f" ({block.count} occurrences): {places}",
-                    block_occurrence,
-                )
-    if "near_matches" in failing:
-        for row in near_rows:
-            message = (
-                f"Near match: {row.a.qualname} and {row.b.qualname} "
-                f"(similarity {row.similarity_score:.3f},"
-                f" {row.shared_statements} shared statements)"
-            )
-            emit(message, row.a)
-            emit(message, row.b)
-    if "abstract_candidates" in failing:
-        for row in abstract_rows:
-            message = (
-                f"Abstraction candidate: {row.a.qualname} and {row.b.qualname}; "
-                f"suggestion: {row.suggested_refactor_kind}"
-            )
-            emit(message, row.a)
-            emit(message, row.b)
-
-    return emitted
-
-
-def _write_github_outputs(summary: dict[str, int], passed: bool, report: Path) -> None:
-    output_path = os.environ.get("GITHUB_OUTPUT")
-    if not output_path:
-        return
-    with Path(output_path).open("a", encoding="utf-8") as stream:
-        stream.write(f"result={'pass' if passed else 'fail'}\n")
-        stream.write(f"report={report}\n")
-        stream.write(f"exact-groups={summary['exact_group_count']}\n")
-        stream.write(f"near-matches={summary['near_count']}\n")
-        stream.write(f"abstract-candidates={summary['abstract_count']}\n")
-        stream.write(f"block-clones={summary.get('block_clone_count', 0)}\n")
-
-
-def _write_github_summary(
-    *,
-    root: Path,
-    config: CheckConfig,
-    summary: dict[str, int],
-    new_counts: dict[str, int],
-    violations: list[PolicyViolation],
-    report: Path,
-    config_path: Path | None,
-    baseline_path: Path | None,
-) -> None:
-    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
-    if not summary_path:
-        return
-    status = "Passed" if not violations else "Failed"
-    reproduce = ["pydry", "check", str(root)]
-    if config_path is not None:
-        reproduce.extend(["--config", str(config_path)])
-    reproduce.extend(
-        [
-            "--profile",
-            config.profile,
-            "--threshold",
-            str(config.threshold),
-            "--top-k",
-            str(config.top_k),
-            "--min-statements",
-            str(config.min_statements),
-            "--block-min-statements",
-            str(config.block_min_statements),
-        ]
-    )
-    boolean_options = {
-        "top-level-only": config.top_level_only,
-        "strict": config.strict,
-        "normalize-local-names": config.normalize_local_names,
-        "normalize-constants": config.normalize_constants,
-        "ignore-trivial": config.ignore_trivial,
-        "fail-on-scan-errors": config.fail_on_scan_errors,
-        "fail-on-plugin-errors": config.fail_on_plugin_errors,
-    }
-    reproduce.extend(
-        f"--{name}" if enabled else f"--no-{name}"
-        for name, enabled in boolean_options.items()
-    )
-    limits = {
-        "max-exact-groups": config.max_exact_groups,
-        "max-block-clones": config.max_block_clones,
-        "max-near-matches": config.max_near_matches,
-        "max-abstract-candidates": config.max_abstract_candidates,
-    }
-    for name, value in limits.items():
-        reproduce.extend([f"--{name}", "none" if value is None else str(value)])
-    for pattern in config.exclude:
-        reproduce.extend(["--exclude", pattern])
-    if baseline_path is not None:
-        reproduce.extend(["--baseline", str(baseline_path)])
-    reproduce.extend(["--annotation-limit", str(config.annotation_limit)])
-
-    rows = [
-        (
-            "Exact duplicate groups",
-            "exact_group_count",
-            "exact",
-            config.max_exact_groups,
-        ),
-        ("Repeated blocks", "block_clone_count", "blocks", config.max_block_clones),
-        ("Near matches", "near_count", "near", config.max_near_matches),
-        (
-            "Abstraction candidates",
-            "abstract_count",
-            "abstract",
-            config.max_abstract_candidates,
-        ),
-    ]
-    lines = [
-        f"## pydry check: {status}",
-        "",
-        "| Finding | Total | New | Allowed |",
-        "| --- | ---: | ---: | ---: |",
-    ]
-    for label, total_key, new_key, limit in rows:
-        lines.append(
-            f"| {label} | {summary[total_key]} | {new_counts[new_key]} |"
-            f" {_display_limit(limit)} |"
-        )
-    lines.extend(
-        [
-            "",
-            f"Configuration: profile `{config.profile}`,"
-            f" threshold `{config.threshold}`,"
-            f" minimum statements `{config.min_statements}`,"
-            f" block size `{config.block_min_statements}`.",
-            "",
-            f"Report: `{report}`",
-        ]
-    )
-    if baseline_path is not None:
-        lines.extend(["", f"Baseline: `{baseline_path}` (accepted findings excluded)"])
-    lines.extend(
-        ["", "Reproduce locally:", "", f"```console\n{shlex.join(reproduce)}\n```"]
-    )
-    if violations:
-        lines.extend(["", "### Policy violations", ""])
-        lines.extend(f"- {item.message}" for item in violations)
-    with Path(summary_path).open("a", encoding="utf-8") as stream:
-        stream.write("\n".join(lines) + "\n")
-
-
-def _display_limit(value: int | None) -> str:
-    return "not enforced" if value is None else str(value)
-
-
 # ── Entry point ──────────────────────────────────────────────
 
 
@@ -537,6 +267,7 @@ def run_check(
             block_clones(
                 root,
                 min_statements=config.block_min_statements,
+                near_threshold=config.threshold,
                 profiles=profiles,
             ),
             near_rows,
@@ -544,7 +275,7 @@ def run_check(
     except (RuntimeError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         if github:
-            _annotation("error", str(exc), title="pydry analysis failed")
+            annotation("error", str(exc), title="pydry analysis failed")
         return 2
 
     scan_errors = _dedupe(scan_errors)
@@ -574,7 +305,7 @@ def run_check(
         except ValueError as exc:
             print(f"Error: {exc}", file=sys.stderr)
             if github:
-                _annotation("error", str(exc), title="pydry baseline failed")
+                annotation("error", str(exc), title="pydry baseline failed")
             return 2
     elif baseline_path is not None:
         print(
@@ -637,7 +368,7 @@ def run_check(
     except OSError as exc:
         print(f"Error: Could not write report {output_path}: {exc}", file=sys.stderr)
         if github:
-            _annotation("error", str(exc), title="pydry report failed")
+            annotation("error", str(exc), title="pydry report failed")
         return 2
 
     summary = payload["summary"]
@@ -660,7 +391,7 @@ def run_check(
         print(f"- {violation.message}", file=sys.stderr)
 
     if github:
-        emitted = _finding_annotations(
+        emitted = finding_annotations(
             config=config,
             violations=violations,
             exact_rows=new_exact,
@@ -687,10 +418,10 @@ def run_check(
         )
         remaining = max(0, config.annotation_limit - emitted)
         for level, kind, message in diagnostics[:remaining]:
-            _annotation(level, message, title=f"pydry {kind} error")
+            annotation(level, message, title=f"pydry {kind} error")
         try:
-            _write_github_outputs(typed_summary, not violations, output_path)
-            _write_github_summary(
+            write_github_outputs(typed_summary, not violations, output_path)
+            write_github_summary(
                 root=root,
                 config=config,
                 summary=typed_summary,
@@ -702,6 +433,6 @@ def run_check(
             )
         except OSError as exc:
             print(f"Error: Could not write GitHub metadata: {exc}", file=sys.stderr)
-            _annotation("error", str(exc), title="pydry GitHub output failed")
+            annotation("error", str(exc), title="pydry GitHub output failed")
             return 2
     return 0 if not violations else 1
