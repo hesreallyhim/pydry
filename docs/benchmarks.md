@@ -16,12 +16,14 @@ Threshold `0.8`, minimum `2` statements, trivial bodies skipped, block size `6`.
 
 | Package | Functions | Analyzed | Time | Exact groups | Repeated blocks | Near pairs |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| email | 530 | 351 | 1.4 s | 9 | 19 | 11 |
-| asyncio | 983 | 617 | 2.0 s | 7 | 23 | 39 |
-| json | 31 | 27 | 0.2 s | 0 | 5 | 1 |
-| http | 230 | 183 | 0.7 s | 2 | 4 | 5 |
-| unittest | 2569 | 1599 | 6.0 s | 58 | 60 | 238 |
-| logging | 258 | 191 | 0.6 s | 1 | 4 | 14 |
+| email | 530 | 351 | 1.0 s | 9 | 19 | 11 |
+| asyncio | 983 | 617 | 1.3 s | 7 | 23 | 39 |
+| json | 31 | 27 | 0.1 s | 0 | 5 | 1 |
+| http | 230 | 183 | 0.5 s | 2 | 4 | 5 |
+| unittest | 2569 | 1599 | 3.5 s | 58 | 60 | 238 |
+| logging | 258 | 191 | 0.4 s | 1 | 4 | 14 |
+
+A full report over the entire standard library (about 14,400 functions after excluding test packages) takes about half a minute, most of it parsing and tokenizing; near matching uses a prefix filter so the pairwise stage stays well under ten seconds.
 
 "Analyzed" is the number of functions left after the minimum-statement and triviality filters. The `unittest` package includes its own test suite, which is repetitive by design; a project would normally exclude tests or use the `lenient` profile for them.
 
