@@ -71,12 +71,12 @@ class CheckCommandTests(unittest.TestCase):
             {
                 "a.py": """
                 def first(value):
-                    result = value + 1
+                    result = normalize(value) + 1
                     return result
                 """,
                 "b.py": """
                 def second(item):
-                    output = item + 1
+                    output = normalize(item) + 1
                     return output
                 """,
             }
@@ -105,10 +105,12 @@ class CheckCommandTests(unittest.TestCase):
                 "config",
                 "settings",
                 "summary",
+                "baseline",
                 "check",
                 "exact",
                 "near",
                 "abstract",
+                "blocks",
             },
         )
         self.assertEqual(
@@ -118,12 +120,21 @@ class CheckCommandTests(unittest.TestCase):
         self.assertFalse(results["check"]["passed"])
         self.assertEqual(
             results["check"]["report_truncated"],
-            {"near": False, "abstract": False},
+            {"near": False, "abstract": False, "blocks": False},
         )
         self.assertEqual(results["summary"]["exact_group_count"], 1)
         self.assertEqual(
             set(results["exact"][0]),
-            {"hash", "count", "occurrences", "canonical"},
+            {
+                "hash",
+                "count",
+                "occurrences",
+                "tier",
+                "stmt_count",
+                "savings",
+                "canonical",
+                "baselined",
+            },
         )
         self.assertEqual(
             set(envelope["diagnostics"]),
@@ -341,11 +352,12 @@ class CheckCommandTests(unittest.TestCase):
                 "exact-groups=0",
                 "near-matches=0",
                 "abstract-candidates=0",
+                "block-clones=0",
             ],
         )
         summary = step_summary.read_text(encoding="utf-8")
         self.assertIn("## pydry check: Passed", summary)
-        self.assertIn("| Exact duplicate groups | 0 | 0 |", summary)
+        self.assertIn("| Exact duplicate groups | 0 | 0 | 0 |", summary)
         self.assertIn(f"Report: `{report}`", summary)
         self.assertIn(
             f"pydry check {root} --config 'config/pydry policy.toml'",

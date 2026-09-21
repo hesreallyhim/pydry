@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import tomllib
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 
 class ConfigError(ValueError):
@@ -18,19 +18,45 @@ class CheckConfig:
     """Effective settings for the policy-oriented check command."""
 
     root: str = "."
+    profile: str = "balanced"
     threshold: float = 0.8
     top_k: int = 200
     top_level_only: bool = False
     strict: bool = True
     normalize_local_names: bool = True
     normalize_constants: bool = True
+    min_statements: int = 2
+    ignore_trivial: bool = True
+    block_min_statements: int = 6
+    exclude: tuple[str, ...] = ()
+    baseline: str | None = None
     max_exact_groups: int | None = 0
     max_near_matches: int | None = None
-    max_abstract_candidates: int | None = 0
+    max_abstract_candidates: int | None = None
+    max_block_clones: int | None = 0
     fail_on_scan_errors: bool = True
     fail_on_plugin_errors: bool = True
     annotation_limit: int = 10
 
+
+PROFILES: dict[str, dict[str, object]] = {
+    "strict": {
+        "threshold": 0.8,
+        "min_statements": 2,
+        "block_min_statements": 5,
+        "max_exact_groups": 0,
+        "max_abstract_candidates": 0,
+        "max_block_clones": 0,
+    },
+    "balanced": {},
+    "lenient": {
+        "threshold": 0.85,
+        "min_statements": 4,
+        "block_min_statements": 8,
+        "max_exact_groups": 0,
+        "max_block_clones": None,
+    },
+}
 
 _CONFIG_KEYS = {field.name for field in fields(CheckConfig)}
 _BOOL_KEYS = {
@@ -38,13 +64,16 @@ _BOOL_KEYS = {
     "strict",
     "normalize_local_names",
     "normalize_constants",
+    "ignore_trivial",
     "fail_on_scan_errors",
     "fail_on_plugin_errors",
 }
+_COUNT_KEYS = {"top_k", "annotation_limit", "min_statements", "block_min_statements"}
 _OPTIONAL_COUNT_KEYS = {
     "max_exact_groups",
     "max_near_matches",
     "max_abstract_candidates",
+    "max_block_clones",
 }
 
 
@@ -84,6 +113,21 @@ def _validate_config_values(values: dict[str, object]) -> dict[str, object]:
             if not isinstance(value, str) or not value:
                 raise ConfigError("root must be a non-empty string")
             validated[key] = value
+        elif key == "profile":
+            if not isinstance(value, str) or value not in PROFILES:
+                names = ", ".join(sorted(PROFILES))
+                raise ConfigError(f"profile must be one of: {names}")
+            validated[key] = value
+        elif key == "baseline":
+            if value is not None and (not isinstance(value, str) or not value):
+                raise ConfigError("baseline must be a non-empty string")
+            validated[key] = value
+        elif key == "exclude":
+            if not isinstance(value, list) or not all(
+                isinstance(item, str) and item for item in value
+            ):
+                raise ConfigError("exclude must be a list of non-empty strings")
+            validated[key] = tuple(value)
         elif key == "threshold":
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 raise ConfigError("threshold must be a number")
@@ -91,16 +135,14 @@ def _validate_config_values(values: dict[str, object]) -> dict[str, object]:
             if not 0.0 <= threshold <= 1.0:
                 raise ConfigError("threshold must be between 0 and 1")
             validated[key] = threshold
-        elif key == "top_k":
+        elif key in _COUNT_KEYS:
             count = _validate_count(key, value, optional=False)
             assert count is not None
+            if key == "block_min_statements" and count < 2:
+                raise ConfigError("block_min_statements must be >= 2")
             validated[key] = count
         elif key in _OPTIONAL_COUNT_KEYS:
             validated[key] = _validate_count(key, value, optional=True)
-        elif key == "annotation_limit":
-            count = _validate_count(key, value, optional=False)
-            assert count is not None
-            validated[key] = count
         elif key in _BOOL_KEYS:
             if not isinstance(value, bool):
                 raise ConfigError(f"{key} must be true or false")
@@ -133,43 +175,19 @@ def apply_overrides(config: CheckConfig, **overrides: object) -> CheckConfig:
     for key in _OPTIONAL_COUNT_KEYS:
         if supplied.get(key) == "none":
             supplied[key] = None
+    if "exclude" in supplied:
+        supplied["exclude"] = tuple(supplied["exclude"])  # type: ignore[arg-type]
     return _merge(config, supplied)
 
 
 def _merge(config: CheckConfig, values: dict[str, object]) -> CheckConfig:
-    return CheckConfig(
-        root=cast("str", values.get("root", config.root)),
-        threshold=cast("float", values.get("threshold", config.threshold)),
-        top_k=cast("int", values.get("top_k", config.top_k)),
-        top_level_only=cast(
-            "bool", values.get("top_level_only", config.top_level_only)
-        ),
-        strict=cast("bool", values.get("strict", config.strict)),
-        normalize_local_names=cast(
-            "bool",
-            values.get("normalize_local_names", config.normalize_local_names),
-        ),
-        normalize_constants=cast(
-            "bool", values.get("normalize_constants", config.normalize_constants)
-        ),
-        max_exact_groups=cast(
-            "int | None", values.get("max_exact_groups", config.max_exact_groups)
-        ),
-        max_near_matches=cast(
-            "int | None", values.get("max_near_matches", config.max_near_matches)
-        ),
-        max_abstract_candidates=cast(
-            "int | None",
-            values.get("max_abstract_candidates", config.max_abstract_candidates),
-        ),
-        fail_on_scan_errors=cast(
-            "bool", values.get("fail_on_scan_errors", config.fail_on_scan_errors)
-        ),
-        fail_on_plugin_errors=cast(
-            "bool",
-            values.get("fail_on_plugin_errors", config.fail_on_plugin_errors),
-        ),
-        annotation_limit=cast(
-            "int", values.get("annotation_limit", config.annotation_limit)
-        ),
+    """Apply a profile's defaults first, then the explicitly supplied keys."""
+
+    profile = values.get("profile", config.profile)
+    assert isinstance(profile, str)
+    merged = (
+        replace(config, **PROFILES[profile])  # type: ignore[arg-type]
+        if "profile" in values
+        else config
     )
+    return replace(merged, **values)  # type: ignore[arg-type]

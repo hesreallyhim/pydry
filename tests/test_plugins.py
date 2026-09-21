@@ -20,38 +20,46 @@ class PluginTests(unittest.TestCase):
             path.write_text(textwrap.dedent(content))
         return root
 
-    def test_builtin_wrapper_plugin_labels_pair(self):
+    def test_side_effect_and_dependency_plugins_flag_risks(self):
         root = self._make_repo(
             {
                 "a.py": """
-                def wrap_a(x):
-                    return normalize(x)
+                def save_txt(report, path):
+                    lines = []
+                    for key, value in report.items():
+                        lines.append(f"{key}: {value}")
+                    content = "\\n".join(lines)
+                    with open(path, "w") as f:
+                        f.write(content)
             """,
                 "b.py": """
-                def wrap_b(y):
-                    return normalize(y)
+                def save_csv(report, path):
+                    lines = [",".join(report.keys())]
+                    lines.append(",".join(str(v) for v in report.values()))
+                    content = "\\n".join(lines)
+                    with open(path, "w") as f:
+                        f.write(content)
             """,
             }
         )
-        rows = near_matches(root, threshold=0.4)
-        self.assertTrue(rows)
-        top = rows[0]
-        self.assertIn("wrapper", top.pattern_labels)
-        self.assertEqual(
-            top.suggested_refactor_kind, "merge_into_single_function_with_param"
-        )
-        self.assertIn("wrapper", top.metadata)
+        rows = near_matches(root, threshold=0.5)
+        self.assertEqual(len(rows), 1)
+        self.assertIn("possible_side_effects", rows[0].risk_flags)
+        self.assertEqual(rows[0].metadata["side_effects"]["calls"], ["f.write"])
 
     def test_plugin_failure_is_isolated_and_reported(self):
         root = self._make_repo(
             {
                 "a.py": """
                 def add_one(x):
-                    return x + 1
+                    y = helper(x)
+                    return y + 1
             """,
                 "b.py": """
                 def add_two(y):
-                    return y + 2
+                    z = helper(y)
+                    w = z + 2
+                    return w
             """,
             }
         )

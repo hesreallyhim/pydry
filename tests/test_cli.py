@@ -130,6 +130,7 @@ class CliTests(unittest.TestCase):
                     for item in items:
                         if item > 0:
                             out.append(item)
+                    out.sort()
                     return out
 
                 def build_admin_query(admin_id):
@@ -164,7 +165,7 @@ class CliTests(unittest.TestCase):
             with redirect_stdout(stdout), redirect_stderr(stderr):
                 rc = main(["showcase"])
             self.assertEqual(rc, 0)
-            self.assertIn("PYDRY SHOWCASE SIMULATION", stdout.getvalue())
+            self.assertIn("PYDRY SHOWCASE", stdout.getvalue())
             self.assertEqual(stderr.getvalue(), "")
 
     def test_simulate_alias_uses_showcase_pipeline(self):
@@ -305,6 +306,7 @@ class CliTextOutputTests(unittest.TestCase):
                     for item in items:
                         if item > 0:
                             out.append(item)
+                    out.sort()
                     return out
 
                 def build_admin_query(admin_id):
@@ -393,8 +395,9 @@ class CliTextOutputTests(unittest.TestCase):
             rc = main(["near", str(root), "--threshold", "0.5", "--format", "text"])
         self.assertEqual(rc, 0)
         output = stdout.getvalue()
-        self.assertIn("sim=", output)
-        self.assertIn("refactor=", output)
+        self.assertIn("Cluster 1:", output)
+        self.assertIn("similarity", output)
+        self.assertIn("suggestion:", output)
         self.assertIn("<->", output)
 
     def test_near_text_no_matches(self) -> None:
@@ -433,7 +436,7 @@ class CliTextOutputTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         output = stdout.getvalue()
         # Abstract uses _print_near under the hood
-        self.assertIn("sim=", output)
+        self.assertIn("similarity", output)
 
     def test_abstract_text_no_candidates(self) -> None:
         root = self._make_repo(
@@ -479,7 +482,7 @@ class CliTextOutputTests(unittest.TestCase):
             )
         self.assertEqual(rc, 0)
         output = stdout.getvalue()
-        self.assertIn("PYDRY SHOWCASE SIMULATION", output)
+        self.assertIn("PYDRY SHOWCASE", output)
         self.assertIn("[1/3]", output)
         self.assertIn("[2/3]", output)
         self.assertIn("[3/3]", output)
@@ -509,7 +512,7 @@ class CliTextOutputTests(unittest.TestCase):
             )
         self.assertEqual(rc, 0)
         output = stdout.getvalue()
-        self.assertIn("PYDRY SHOWCASE SIMULATION", output)
+        self.assertIn("PYDRY SHOWCASE", output)
         self.assertIn("none", output)
 
     # ── Diagnostics printing ────────────────────────────────────
@@ -520,11 +523,14 @@ class CliTextOutputTests(unittest.TestCase):
             {
                 "a.py": """
                 def add_one(x):
-                    return x + 1
+                    y = helper(x)
+                    return y + 1
             """,
                 "b.py": """
                 def add_two(y):
-                    return y + 1
+                    z = helper(y)
+                    w = z + 2
+                    return w
             """,
             }
         )
