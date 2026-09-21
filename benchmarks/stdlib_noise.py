@@ -88,9 +88,7 @@ def run(
             f"  saves {group.savings:>3}  {names}"
         )
     for block in blocks[:show]:
-        where = ", ".join(
-            f"{o.qualname}:{o.lineno}" for o in block.occurrences[:3]
-        )
+        where = ", ".join(f"{o.qualname}:{o.lineno}" for o in block.occurrences[:3])
         print(
             f"   block  {block.stmt_count:>3} stmts x{block.count}"
             f"  saves {block.savings:>3}  {where}"

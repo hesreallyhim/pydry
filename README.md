@@ -1,13 +1,14 @@
 # pydry
 
-pydry is a Python library for maintaining DRY code - it scans your repository looking for exact duplicate functions, nearly duplicate functions, and functions with varying degrees of strucural similarity. It can be used in CI to identify any new code that would violate DRYness, and it can also be used as a guide when refactoring, by highlighting code blocks that are similar enough to be good candidates for dedpulication.
+pydry finds duplicated Python code and ranks it by how much you would save by consolidating it. It works on the syntax tree, so renamed variables, changed literals, and reformatted code do not hide a copy.
 
-## Features
+It reports three kinds of finding:
 
-- Finds exact duplicate functions using AST normalization.
-- Ranks near matches by structural similarity and refactorability.
-- Flags likely abstraction candidates and common risk signals.
-- Emits text output for quick inspection and JSON output for automation.
+- **Exact duplicates**: whole functions that are equivalent after normalization, labeled with the tightest equivalence that holds (`identical`, `renamed`, or `constants`).
+- **Repeated blocks**: runs of consecutive statements copied into two or more places, including the middle of larger functions.
+- **Near matches**: pairs of functions that share most of their statements, with a diff-derived explanation of what differs (inserted statements, changed constants, a parameter hard-coded on one side) and a suggested refactor.
+
+Findings are ranked by estimated savings in statements, weighted by a confidence score, so the first result is the one most worth acting on. Stubs, accessors, and other call-free boilerplate are skipped by default.
 
 ## Installation
 
@@ -26,33 +27,132 @@ make check
 
 ## Quick start
 
-Run a compact summary for the current directory:
-
 ```bash
-pydry showcase
+pydry showcase ./src
 ```
 
-Find exact duplicates:
+```text
+Summary: exact_groups=6 repeated_blocks=1 near_pairs=3 abstract_candidates=3
 
-```bash
-pydry exact ./src --normalize-local-names --normalize-constants
+[1/3] Exact duplicates (whole functions)
+  1. 3x renamed, 8 statements, saves ~16: process_csv_row, process_json_entry, clean_record
+  2. 2x constants, 5 statements, saves ~5: build_user_query, build_admin_query
+
+[2/3] Repeated blocks (inside larger functions)
+  1. 11 statements x2, saves ~11: parse_records:12-22, summarize_file:27-37
+
+[3/3] Near matches (ranked by priority)
+  1. priority 7.6, 8 shared statements, saves ~8 (delegate_to_general_form): retry, retry_quickly
+  2. priority 4.8, 5 shared statements, saves ~5 (delegate_to_general_form): clamp_value, clamp_to_unit
 ```
 
-Find near matches:
+Each command also has a `--format json` mode for tooling.
+
+## Commands
+
+### `pydry exact`
+
+Whole functions that are duplicates under normalization. Local variable names and literal values are normalized by default; docstrings, annotations, decorators, and parameter names are always ignored.
 
 ```bash
-pydry near ./src --threshold 0.85 --top-k 25
+pydry exact ./src
+pydry exact ./src --no-normalize-constants     # only report renamed or identical copies
+pydry exact ./src --min-count 3 --format json
 ```
 
-Write a full JSON report:
+Each group reports its `tier`, its statement count, and `savings`, the number of statements that would disappear if all copies but one were removed.
+
+### `pydry blocks`
+
+Runs of statements repeated in two or more places. This is what catches a parsing loop pasted into the middle of a larger function, which whole-function comparison cannot see.
+
+```bash
+pydry blocks ./src
+pydry blocks ./src --block-min-statements 8    # only longer runs
+```
+
+Blocks are matched on the normalized statement form, so renamed locals and changed constants still match. Runs that cover most of both functions are left to the exact and near-match reports.
+
+### `pydry near`
+
+Pairs of functions that share at least `--threshold` of their statements, measured as `2 * shared / (len_a + len_b)` over an alignment of the two statement sequences.
+
+```bash
+pydry near ./src
+pydry near ./src --threshold 0.7 --top-k 20
+```
+
+Results are grouped into clusters of transitively connected functions. Each pair reports:
+
+- `shared_statements` and the length of each side, so you can see the diff at a glance.
+- `pattern_labels` derived from the alignment: `renamed_locals`, `literal_specialization`, `parameter_specialization`, `structural_variant`, `mixed_variation`, `different_dependencies`.
+- `risk_flags` that discourage a merge: `async_boundary_diff`, `return_shape_diff`, `exception_behavior_diff`, `possible_side_effects`, `ambient_dependency_diff`.
+- `suggested_refactor_kind`: `remove_duplicate`, `parameterize_constant`, `delegate_to_general_form`, `extract_common_helper`, `extract_shared_steps`, `inject_dependency`, or `leave_separate`.
+- `refactorability_score`, a confidence estimate, and `priority`, which is shared statements multiplied by that confidence.
+
+Functions that are exact duplicates of one another are represented by a single member, so exact groups are never repeated here.
+
+### `pydry abstract`
+
+The near matches whose suggestion is not `leave_separate`.
+
+### `pydry report`
+
+One JSON document with `exact`, `blocks`, `near`, and `abstract` sections plus a summary.
 
 ```bash
 pydry report ./src --output reports/pydry-report.json
 ```
 
+### `pydry check`
+
+Evaluate findings against a policy and return a CI-friendly status: `0` for pass, `1` for a policy violation, or `2` for a configuration or execution failure.
+
+```bash
+pydry check
+pydry check ./src --profile strict
+pydry check --baseline .pydry-baseline.json
+pydry check --update-baseline
+```
+
+Policy lives in a `pydry.toml` next to your code:
+
+```toml
+root = "src"
+profile = "balanced"        # strict | balanced | lenient
+exclude = ["tests", "**/generated_*.py"]
+baseline = ".pydry-baseline.json"
+
+max_exact_groups = 0        # fail on any whole-function duplicate
+max_block_clones = 0        # fail on any repeated block
+max_abstract_candidates = "none"   # report near matches, do not enforce
+```
+
+With a baseline, `check` only counts findings that are not already recorded, so an existing codebase can adopt pydry without first paying down every duplicate. Run `pydry check --update-baseline` to accept the current state, commit the file, and the check will fail only on new duplication. Baselines are keyed on the content of the duplicated code, so a baselined finding resurfaces once either side is edited.
+
+Profiles set defaults for the sensitivity knobs; explicit keys override them:
+
+| Profile | Threshold | Min statements | Block size | Enforced by default |
+| --- | --- | --- | --- | --- |
+| `strict` | 0.8 | 2 | 5 | exact, blocks, abstract |
+| `balanced` | 0.8 | 2 | 6 | exact, blocks |
+| `lenient` | 0.85 | 4 | 8 | exact |
+
+Not every project weights DRYness the same way. Test suites in particular are repetitive by design, which is what `exclude` and `lenient` are for.
+
+### Shared options
+
+Every analysis command accepts:
+
+- `--min-statements N`: ignore functions with fewer statements (default `2`).
+- `--no-ignore-trivial`: also analyze stubs, accessors, and call-free boilerplate.
+- `--exclude GLOB`: skip paths matching a glob relative to the root; repeatable.
+- `--top-level-only`: ignore nested functions and methods.
+- `--strict`: fail on files that cannot be read or parsed.
+
 ## GitHub Actions
 
-This repository also ships a GitHub Action so that you can easily incorporate pydry into your CI/CD workflows:
+The repository ships as a composite action that runs `pydry check`, writes the JSON report, and adds findings as annotations:
 
 ```yaml
 name: pydry
@@ -70,146 +170,39 @@ jobs:
       - uses: hesreallyhim/pydry@v0
 ```
 
-If you want to enforce DRYness standards, you can configure the pydry job as a required status check. Policy lives in a standalone `pydry.toml`; action inputs can override individual settings.
+Action inputs mirror the `pydry.toml` keys and override them individually. See the [integration guide](docs/README.action.md).
 
-## Commands
+## How it works
 
-### `pydry exact`
+Every function is flattened into a sequence of statement tokens. Each token is the statement's syntax tree with local names replaced by positional placeholders and constants replaced by typed placeholders, so `total += item.price` and `acc += row.price` produce the same token while `acc += row.cost` does not. Attribute names, module-level names, and imports are kept, because they are what the code depends on.
 
-Find exact duplicate functions after AST normalization.
+- Exact groups hash the whole normalized function at three tiers and report the tightest one that holds.
+- Near matches align two token sequences with a longest common subsequence. The aligned statements are compared again at the stricter tiers to classify what differs, and a looser tier that also equates parameters with literals catches a function that hard-codes an argument of its sibling.
+- Repeated blocks hash every window of consecutive tokens, extend matching windows to maximal runs, and group runs by content.
 
-```bash
-pydry exact ./src
-pydry exact ./src --min-count 3
-pydry exact ./src --normalize-local-names --normalize-constants
-pydry exact ./src --format json
-```
+The scores are heuristics: a high similarity means two functions look alike structurally, not that they are semantically interchangeable. The risk flags and the `leave_separate` suggestion exist because structurally similar code is sometimes best left apart.
 
-Useful options:
+## Noise on real code
 
-- `--min-count`: minimum group size, default `2`.
-- `--top-level-only`: ignore nested functions and methods.
-- `--normalize-local-names`: treat local variable renames as equivalent.
-- `--normalize-constants`: treat many literal value changes as equivalent.
-- `--include-canonical`: include canonical AST dumps in JSON output.
-- `--strict`: fail on files that cannot be read or parsed.
-
-### `pydry near`
-
-Rank structurally similar function pairs.
-
-```bash
-pydry near ./src
-pydry near ./src --threshold 0.85 --top-k 25
-pydry near ./src --format json --output reports/near.json
-```
-
-Useful options:
-
-- `--threshold`: similarity threshold from `0` to `1`, default `0.8`.
-- `--top-k`: cap the number of returned pairs.
-- `--top-level-only`: ignore nested functions and methods.
-- `--strict`: fail on files that cannot be read or parsed.
-
-### `pydry abstract`
-
-Filter near matches to pairs that look like plausible refactor candidates.
-
-```bash
-pydry abstract ./src
-pydry abstract ./src --threshold 0.86 --format json
-```
-
-### `pydry report`
-
-Generate one JSON document with exact, near, and abstract sections.
-
-```bash
-pydry report ./src
-pydry report ./src --threshold 0.82 --top-k 250 --output reports/pydry-report.json
-```
-
-### `pydry check`
-
-Evaluate findings against `pydry.toml` and return a CI-friendly status: `0` for pass, `1` for a policy violation, or `2` for configuration/execution failure.
-
-```bash
-pydry check
-pydry check ./src --max-exact-groups 0 --max-abstract-candidates 5
-pydry check --config config/pydry.toml --output reports/pydry-check.json
-```
-
-Command-line values override repository configuration. Use `none` for a `--max-*` option when that finding category should be reported but not enforced. The complete configuration and GitHub rendering reference is in the [integration guide](docs/github-action.md).
-
-### `pydry showcase` and `pydry simulate`
-
-Run a compact terminal summary. Both commands use the same analysis pipeline. With no path, they scan the current directory.
-
-```bash
-pydry showcase
-pydry showcase ./src --top-k 10 --threshold 0.8
-pydry showcase ./src --format json
-pydry simulate ./src
-```
-
-## JSON output
-
-JSON-capable commands return an envelope:
-
-```json
-{
-  "results": [],
-  "diagnostics": {
-    "scan_errors_count": 0,
-    "scan_error_samples": [],
-    "plugin_errors_count": 0,
-    "plugin_error_samples": []
-  }
-}
-```
-
-Near and abstract entries include scores, supporting evidence, pattern labels, differences, risk flags, and a suggested refactor.
-
-### Similarity metrics
-
-All scores range from `0` to `1`; higher values indicate a stronger match for that heuristic.
-
-| Metric | What it measures |
-| --- | --- |
-| `similarity_score` | Overall structural resemblance, combining the evidence metrics below. `--threshold` filters on this score. |
-| `refactorability_score` | How promising the pair appears for consolidation, accounting for structural evidence, recognized patterns, and refactoring risks. Results are ranked by this score. |
-| `shape_similarity` | Overlap in the kinds and counts of AST nodes used by the two functions. |
-| `stmt_similarity` | Similarity in the order of statement kinds. |
-| `call_similarity` | Overlap in the names and counts of functions or methods called. |
-| `signature_similarity` | Similarity in parameter count and async or generator behavior. |
-| `wrapper_score` | Evidence that one or both functions are thin wrappers, especially around the same target. |
-| `curry_score` | Evidence that the functions construct partial applications by returning lambdas with similar nesting. |
-
-`metadata.size_ratio` compares the smaller function's statement count with the larger function's. These metrics are heuristics, not probabilities or proof that two functions are semantically equivalent.
+Defaults are tuned against the standard library, which is well maintained and where most whole-function similarity is idiomatic rather than a copy. The benchmark script and its current numbers are in [docs/benchmarks.md](docs/benchmarks.md); run `make benchmark` to reproduce.
 
 ## Python API
 
-The CLI is the primary interface, but the core functions are importable:
+The core functions are importable:
 
 ```python
 from pathlib import Path
 
-from pydry.engine import exact_groups, near_matches
+from pydry.engine import block_clones, exact_groups, near_matches, scan_functions
 
-groups = exact_groups(
-    Path("src"),
-    normalize_local_names=True,
-    normalize_constants=True,
-)
-rows = near_matches(Path("src"), threshold=0.85, top_k=25)
+profiles = scan_functions(Path("src"))
+groups = exact_groups(Path("src"), profiles=profiles)
+pairs = near_matches(Path("src"), threshold=0.8, profiles=profiles)
+blocks = block_clones(Path("src"), profiles=profiles)
 ```
 
-## Limitations
-
-- Similarity is heuristic. It does not prove semantic equivalence.
-- Cross-file import resolution is not attempted.
-- Generated abstraction templates are suggestions, not executable patches.
+Passing `profiles` lets several analyses share one scan.
 
 ## License
 
-pydry is released under the MIT License. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).

@@ -85,6 +85,10 @@ demo-showcase: $(INSTALL_STAMP) ## Run a quick CLI showcase against ./demo
 demo-simulate: $(INSTALL_STAMP) ## Run a visual CLI simulation against ./demo
 	$(PYTHON) -m pydry simulate demo
 
+.PHONY: benchmark
+benchmark: $(INSTALL_STAMP) ## Measure finding counts on standard library packages
+	$(PYTHON) benchmarks/stdlib_noise.py
+
 .PHONY: check
 check: lint actionlint format-check typecheck test pydry-check ## Run all checks
 
