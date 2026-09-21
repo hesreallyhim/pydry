@@ -269,6 +269,31 @@ class ExactGroupTests(RepoMixin, unittest.TestCase):
             [o.name for o in identical_only[0].occurrences], ["one", "four"]
         )
 
+    def test_different_helpers_are_not_renamed_duplicates(self) -> None:
+        root = self._make_repo(
+            {
+                "a.py": """
+                def shape(a, b):
+                    left = prepare(a)
+                    return jaccard(left, b)
+
+                def order(a, b):
+                    left = prepare(a)
+                    return lcs_ratio(left, b)
+
+                def shape_again(x, y):
+                    lhs = prepare(x)
+                    return jaccard(lhs, y)
+                """
+            }
+        )
+        groups = exact_groups(root)
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(
+            [o.name for o in groups[0].occurrences], ["shape", "shape_again"]
+        )
+        self.assertEqual(groups[0].tier, "renamed")
+
     def test_trivial_and_short_functions_are_skipped_by_default(self) -> None:
         root = self._make_repo({"a.py": BOILERPLATE})
         self.assertEqual(exact_groups(root), [])

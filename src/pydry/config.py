@@ -184,7 +184,9 @@ def _merge(config: CheckConfig, values: dict[str, object]) -> CheckConfig:
     """Apply a profile's defaults first, then the explicitly supplied keys."""
 
     profile = values.get("profile", config.profile)
-    assert isinstance(profile, str)
+    if not isinstance(profile, str) or profile not in PROFILES:
+        names = ", ".join(sorted(PROFILES))
+        raise ConfigError(f"profile must be one of: {names}")
     merged = (
         replace(config, **PROFILES[profile])  # type: ignore[arg-type]
         if "profile" in values

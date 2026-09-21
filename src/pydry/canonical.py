@@ -9,8 +9,9 @@ the next depth. Each token carries three canonical strings:
 - ``names``: additionally, names bound inside the function are replaced by
   positional placeholders, numbered per statement.
 - ``full``: additionally, constants are replaced by typed placeholders.
-- ``loose``: local names and constants collapse to a single placeholder, so a
-  parameter and a literal in the same position compare equal.
+- ``loose``: local names, literals, and ``UPPER_CASE`` module constants
+  collapse to a single placeholder, so a parameter, a literal, and a named
+  constant in the same position compare equal.
 
 Comparing two aligned statements at these three tiers tells the engine whether
 they are identical, differ only by local names, or differ only by constants.
@@ -25,7 +26,7 @@ import keyword
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from .normalize import ConstantNormalizer
+from .normalize import ConstantNormalizer, bound_names
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -57,33 +58,6 @@ class StmtToken:
     @property
     def loose_key(self) -> tuple[int, str]:
         return (self.depth, self.loose)
-
-
-def bound_names(fn: _FuncNode) -> frozenset[str]:
-    """Names bound anywhere inside the function, excluding global/nonlocal."""
-
-    names: set[str] = set()
-    declared: set[str] = set()
-    for node in ast.walk(fn):
-        if isinstance(node, ast.arg):
-            names.add(node.arg)
-        elif isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
-            names.add(node.id)
-        elif isinstance(node, ast.ExceptHandler):
-            if node.name:
-                names.add(node.name)
-        elif isinstance(node, _SCOPE_NODES):
-            if node is not fn:
-                names.add(node.name)
-        elif isinstance(node, ast.alias):
-            names.add((node.asname or node.name).split(".")[0])
-        elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name:
-            names.add(node.name)
-        elif isinstance(node, ast.MatchMapping) and node.rest:
-            names.add(node.rest)
-        elif isinstance(node, (ast.Global, ast.Nonlocal)):
-            declared.update(node.names)
-    return frozenset(names - declared)
 
 
 class _StatementNormalizer(ast.NodeTransformer):
@@ -157,11 +131,18 @@ class _StatementNormalizer(ast.NodeTransformer):
         return node
 
 
+def _looks_like_constant(name: str) -> bool:
+    """``UPPER_CASE`` identifiers are treated as constants by convention."""
+
+    return len(name) > 1 and name.isupper()
+
+
 class _SlotNormalizer(ast.NodeTransformer):
     """Collapse placeholders and constants into one slot marker."""
 
     def visit_Name(self, node: ast.Name) -> ast.Name:
-        if node.id.startswith("v") and node.id[1:].isdigit():
+        placeholder = node.id.startswith("v") and node.id[1:].isdigit()
+        if placeholder or _looks_like_constant(node.id):
             return ast.copy_location(ast.Name(id="_", ctx=node.ctx), node)
         return node
 

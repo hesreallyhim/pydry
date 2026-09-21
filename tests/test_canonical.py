@@ -116,6 +116,15 @@ class StatementTokenTests(unittest.TestCase):
         self.assertEqual(ta[0].loose, tb[0].loose)
         self.assertEqual(ta[1].loose, tb[1].loose)
 
+    def test_loose_tier_collapses_upper_case_module_constants(self) -> None:
+        a = _func("def debug(self, msg):\n    self._log(DEBUG, msg)\n")
+        b = _func("def info(self, msg):\n    self._log(INFO, msg)\n")
+        c = _func("def other(self, msg):\n    self._log(level(), msg)\n")
+        ta, tb, tc = (statement_tokens(fn)[0] for fn in (a, b, c))
+        self.assertNotEqual(ta.full, tb.full)
+        self.assertEqual(ta.loose, tb.loose)
+        self.assertNotEqual(ta.loose, tc.loose)
+
     def test_annotations_and_decorators_do_not_matter(self) -> None:
         a = _func("def f(x: int) -> int:\n    y: int = x + 1\n    return y\n")
         b = _func("def f(x):\n    y = x + 1\n    return y\n")

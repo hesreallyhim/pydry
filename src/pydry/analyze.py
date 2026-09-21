@@ -9,9 +9,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .canonical import StmtToken, bound_names, is_trivial, statement_tokens
+from .canonical import StmtToken, is_trivial, statement_tokens
 from .models import FunctionOccurrence
-from .normalize import FunctionNormalizer
+from .normalize import FunctionNormalizer, bound_names
 
 if TYPE_CHECKING:
     from collections.abc import Generator, Iterable, Sequence

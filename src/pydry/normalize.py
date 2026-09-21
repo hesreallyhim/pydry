@@ -3,17 +3,60 @@ from __future__ import annotations
 import ast
 import keyword
 
+_FuncNode = ast.FunctionDef | ast.AsyncFunctionDef
+_SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+
+
+def bound_names(fn: _FuncNode) -> frozenset[str]:
+    """Names bound anywhere inside the function, excluding global/nonlocal."""
+
+    names: set[str] = set()
+    declared: set[str] = set()
+    for node in ast.walk(fn):
+        if isinstance(node, ast.arg):
+            names.add(node.arg)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            names.add(node.id)
+        elif isinstance(node, ast.ExceptHandler):
+            if node.name:
+                names.add(node.name)
+        elif isinstance(node, _SCOPE_NODES):
+            if node is not fn:
+                names.add(node.name)
+        elif isinstance(node, ast.alias):
+            names.add((node.asname or node.name).split(".")[0])
+        elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name:
+            names.add(node.name)
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            names.add(node.rest)
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            declared.update(node.names)
+    return frozenset(names - declared)
+
 
 class LocalNameNormalizer(ast.NodeTransformer):
-    def __init__(self, preserve_self_cls: bool = True) -> None:
+    """Replace local names with positional placeholders.
+
+    With ``bound`` given, only those names are renamed and everything else
+    (module-level helpers, imported names, builtins) is kept, so two
+    functions that call different helpers do not become equivalent. Without
+    it every non-keyword name is renamed.
+    """
+
+    def __init__(
+        self, preserve_self_cls: bool = True, bound: frozenset[str] | None = None
+    ) -> None:
         self.name_map: dict[str, str] = {}
         self.counter = 0
         self.preserve_self_cls = preserve_self_cls
+        self.bound = bound
 
     def _preserve(self, name: str) -> bool:
         if keyword.iskeyword(name) or name in {"True", "False", "None"}:
             return True
-        return self.preserve_self_cls and name in {"self", "cls"}
+        if self.preserve_self_cls and name in {"self", "cls"}:
+            return True
+        return self.bound is not None and name not in self.bound
 
     def _tok(self, name: str) -> str:
         if name not in self.name_map:
@@ -98,6 +141,7 @@ class FunctionNormalizer(ast.NodeTransformer):
     def _normalize(
         self, node: ast.FunctionDef | ast.AsyncFunctionDef
     ) -> ast.FunctionDef | ast.AsyncFunctionDef:
+        bound = bound_names(node)
         node = self.generic_visit(node)  # type: ignore[assignment]
 
         if self.strip_docstrings and node.body:
@@ -144,7 +188,7 @@ class FunctionNormalizer(ast.NodeTransformer):
                 node.args.kwarg.type_comment = None
 
         if self.normalize_local_names:
-            node = LocalNameNormalizer().visit(node)
+            node = LocalNameNormalizer(bound=bound).visit(node)
             node = ast.fix_missing_locations(node)
 
         if self.normalize_constants:
