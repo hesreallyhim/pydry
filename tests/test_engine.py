@@ -505,6 +505,34 @@ class BlockCloneTests(RepoMixin, unittest.TestCase):
         self.assertEqual(groups[0].stmt_count, 5)
 
 
+class CandidateFilterTests(unittest.TestCase):
+    def test_prefix_filter_matches_brute_force_on_demo(self) -> None:
+        from pydry.engine import _candidate_pairs, _compare
+
+        demo = Path(__file__).resolve().parent.parent / "demo"
+        candidates = sorted(
+            (
+                p
+                for p in scan_functions(demo)
+                if p.eligible(min_statements=2, ignore_trivial=True)
+            ),
+            key=lambda p: p.stmt_count,
+        )
+        for threshold in (0.5, 0.8, 1.0):
+            with self.subTest(threshold=threshold):
+                brute = set()
+                for i, a in enumerate(candidates):
+                    for b in candidates[i + 1 :]:
+                        if _compare(a, b, threshold=threshold, plugin_errors=None):
+                            brute.add((a.occurrence.qualname, b.occurrence.qualname))
+                filtered = set()
+                for a, b in _candidate_pairs(candidates, threshold):
+                    if _compare(a, b, threshold=threshold, plugin_errors=None):
+                        filtered.add((a.occurrence.qualname, b.occurrence.qualname))
+                self.assertEqual(filtered, brute)
+                self.assertTrue(brute)
+
+
 class ScanTests(RepoMixin, unittest.TestCase):
     def test_scan_errors_are_collected_or_raised(self) -> None:
         root = self._make_repo({"bad.py": "def broken(:\n", "ok.py": LOADER_A})

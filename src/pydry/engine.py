@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import math
 from collections import Counter, defaultdict
 from dataclasses import asdict
 from typing import TYPE_CHECKING, Any
@@ -28,7 +29,7 @@ from .models import (
 from .plugins import PairContext, PluginContext, apply_pair_plugins
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterator, Sequence
     from pathlib import Path
 
     from .canonical import StmtToken
@@ -516,24 +517,69 @@ def near_matches(
         representatives.setdefault(_tier_hash(profile, "constants"), profile)
     candidates = sorted(representatives.values(), key=lambda p: p.stmt_count)
 
-    # For similarity 2s/(la+lb) >= t with s <= la <= lb, lb <= la * (2 - t) / t.
-    max_ratio = (2.0 - threshold) / threshold if threshold > 0 else None
-
     out: list[SimilarityResult] = []
-    for i, a in enumerate(candidates):
-        for j in range(i + 1, len(candidates)):
-            b = candidates[j]
-            if max_ratio is not None and b.stmt_count > a.stmt_count * max_ratio:
-                break
-            result = _compare(a, b, threshold=threshold, plugin_errors=plugin_errors)
-            if result is not None:
-                out.append(result)
+    for a, b in _candidate_pairs(candidates, threshold):
+        result = _compare(a, b, threshold=threshold, plugin_errors=plugin_errors)
+        if result is not None:
+            out.append(result)
 
     out.sort(key=_result_sort_key)
     _assign_clusters(out)
     if top_k is not None:
         out = out[:top_k]
     return out
+
+
+def _candidate_pairs(
+    candidates: list[FunctionProfile], threshold: float
+) -> Iterator[tuple[FunctionProfile, FunctionProfile]]:
+    """Yield the pairs that could reach ``threshold``, shorter side first.
+
+    ``candidates`` must be sorted by statement count. Two functions can only
+    reach similarity ``t`` when the longer is at most ``(2 - t) / t`` times
+    the shorter, and when their loose token multisets overlap in at least
+    ``s = t * len / (2 - t)`` elements. With tokens ordered by global rarity,
+    any two multisets overlapping in ``s`` elements share an element within
+    their first ``len - s + 1`` tokens (prefix filtering), so indexing only
+    those prefixes finds every qualifying pair without comparing all of them.
+    Loose tokens are used because loose overlap is never smaller than strict.
+    """
+
+    if threshold <= 0.0:
+        for i, a in enumerate(candidates):
+            for b in candidates[i + 1 :]:
+                yield a, b
+        return
+
+    max_ratio = (2.0 - threshold) / threshold
+    frequency: Counter[tuple[int, str]] = Counter()
+    for profile in candidates:
+        frequency.update(profile.loose_counts.keys())
+
+    def prefix(profile: FunctionProfile) -> list[tuple[int, tuple[int, str], int]]:
+        length = profile.stmt_count
+        needed = math.ceil(threshold * length / (2.0 - threshold))
+        expanded = sorted(
+            (frequency[key], key, index)
+            for key, count in profile.loose_counts.items()
+            for index in range(count)
+        )
+        return expanded[: max(1, length - needed + 1)]
+
+    index: dict[tuple[int, tuple[int, str], int], list[int]] = defaultdict(list)
+    for position, a in enumerate(candidates):
+        tokens = prefix(a)
+        seen: set[int] = set()
+        for token in tokens:
+            for other in index.get(token, ()):
+                if other in seen:
+                    continue
+                seen.add(other)
+                b = candidates[other]
+                if a.stmt_count <= b.stmt_count * max_ratio:
+                    yield b, a
+        for token in tokens:
+            index[token].append(position)
 
 
 def _occurrence_key(occ: FunctionOccurrence) -> tuple[str, int, str]:
