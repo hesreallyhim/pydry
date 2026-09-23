@@ -358,9 +358,11 @@ class ScopeAwareNormalizationTests(unittest.TestCase):
         # parameter is left alone rather than renamed as the parameter.
         c = "def f(x):\n    return apply(lambda x: x + 1, x)\n"
         rendered = self._canonical(c)
-        self.assertIn(
-            "Lambda(args=arguments(posonlyargs=[], args=[arg(arg='x')]", rendered
-        )
+        # ast.dump formatting differs across Python versions, so check the
+        # pieces rather than one exact string.
+        self.assertIn("arg(arg='x')", rendered)
+        self.assertIn("Name(id='«arg0»'", rendered)
+        self.assertIn("Name(id='x'", rendered)
 
     def test_nested_global_and_nonlocal_declarations_are_respected(self) -> None:
         a = (
