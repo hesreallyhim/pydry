@@ -186,14 +186,59 @@ The scores are heuristics: a high similarity means two functions look alike stru
 
 Defaults are tuned against the standard library, which is well maintained and where most whole-function similarity is idiomatic rather than a copy. The benchmark script and its current numbers are in [docs/benchmarks.md](docs/benchmarks.md); run `make benchmark` to reproduce.
 
-## Migrating from 0.0.x
+## Project Structure
 
-The 0.1 engine changes defaults and the JSON schema:
-
-- `pydry exact` now normalizes local names and constants by default. Pass `--no-normalize-local-names` or `--no-normalize-constants` for the old behavior, and the same keyword arguments to `exact_groups()`.
-- Functions with fewer than two statements and trivial bodies (stubs, accessors, call-free boilerplate) are skipped by default. Use `--min-statements 1 --no-ignore-trivial` to include them.
-- Near-match evidence is now alignment counts (`shared_statements`, `only_in_a`, `constant_statements`, and so on). The `shape_similarity`, `stmt_similarity`, `signature_similarity`, `wrapper_score`, and `curry_score` fields, the `wrapper` and `partial_application` labels, and `abstract_template` are gone. Results gain `priority`, `shared_statements`, and `cluster_id`.
-- Reports and `check` output gain a `blocks` section, and the check policy gains `max_block_clones`, which defaults to `0`. `max_abstract_candidates` now defaults to unenforced; set `profile = "strict"` to restore the old ceiling of `0`.
+<!-- treestamp:start -->
+<!-- treestamp:config
+root = "."
+depth = 2
+max_children = 10
+style = "unicode"
+show_counts = true
+count_mode = "both"
+excluded_paths = [".gitignore", ".pre-commit-config.yaml", ".python-version", "CHANGELOG.md", "LICENSE", "MANIFEST.in", "Makefile", "pyproject.toml"]
+-->
+```sh
+.
+├── .github/ (7 files, 2 folders)
+├── benchmarks/
+│   └── stdlib_noise.py
+├── demo/
+│   ├── async_handlers.py
+│   ├── data_utils.py
+│   ├── formatters.py
+│   ├── pipelines.py
+│   └── validators.py
+├── docs/
+│   ├── README.action.md # GitHub Action README
+│   ├── benchmarks.md
+│   └── releasing.md
+├── src/
+│   └── pydry/
+│       ├── __init__.py
+│       ├── __main__.py
+│       ├── _version.py
+│       ├── analyze.py
+│       ├── baseline.py
+│       ├── blocks.py
+│       ├── builtin_plugins.py
+│       ├── canonical.py
+│       ├── check.py
+│       ├── cli.py
+│       ├── config.py
+│       ├── engine.py
+│       ├── github.py
+│       ├── models.py
+│       ├── normalize.py
+│       ├── plugins.py
+│       ├── render.py
+│       └── scan.py
+├── tests/ (11 files)
+├── README.md
+├── action.yml # GitHub Action metadata
+└── pydry.toml
+```
+<!-- treestamp:end -->
 
 ## Python API
 
