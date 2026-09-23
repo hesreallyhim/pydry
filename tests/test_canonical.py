@@ -8,12 +8,12 @@ import unittest
 
 from pydry.canonical import (
     bag_upper_bound,
-    bound_names,
     is_trivial,
     lcs_alignment,
     sequence_similarity,
     statement_tokens,
 )
+from pydry.normalize import bound_names
 
 
 def _func(src: str) -> ast.FunctionDef | ast.AsyncFunctionDef:
@@ -169,21 +169,10 @@ class BoundNamesTests(unittest.TestCase):
             """
         )
         names = bound_names(fn)
-        for expected in (
-            "a",
-            "args",
-            "k",
-            "kw",
-            "b",
-            "c",
-            "d",
-            "e",
-            "o",
-            "g",
-            "h",
-            "inner",
-        ):
+        for expected in ("a", "args", "k", "kw", "b", "c", "d", "e", "o", "h", "inner"):
             self.assertIn(expected, names)
+        # The comprehension target is scoped to the comprehension.
+        self.assertNotIn("g", names)
         self.assertNotIn("z", names)
         self.assertNotIn("open", names)
 
@@ -264,6 +253,22 @@ class StructuralCoverageTests(unittest.TestCase):
         for bound in ("direction", "rest", "first", "others"):
             self.assertNotIn(f"'{bound}'", joined)
         self.assertIn("'move'", joined)
+
+    def test_case_headers_take_their_line_from_the_pattern(self) -> None:
+        fn = _func(
+            """
+            def route(command):
+                match command:
+                    case ["go", direction]:
+                        return move(direction)
+                    case _:
+                        return None
+            """
+        )
+        tokens = statement_tokens(fn)
+        cases = [t for t in tokens if t.kind == "match_case"]
+        self.assertEqual([(t.lineno, t.end_lineno) for t in cases], [(4, 4), (6, 6)])
+        self.assertTrue(all(t.lineno > 0 for t in tokens))
 
     def test_try_else_marker_and_bare_string_expressions(self) -> None:
         fn = _func(

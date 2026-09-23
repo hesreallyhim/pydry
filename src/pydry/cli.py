@@ -247,6 +247,8 @@ class _Analysis:
                 root,
                 min_statements=block_min_statements,
                 near_threshold=threshold,
+                min_function_statements=args.min_statements,
+                ignore_trivial=args.ignore_trivial,
                 profiles=profiles,
             ),
             self.near_rows,
@@ -570,6 +572,8 @@ def main(argv: list[str] | None = None) -> int:
             payload = block_clones(
                 root,
                 min_statements=args.block_min_statements,
+                min_function_statements=args.min_statements,
+                ignore_trivial=args.ignore_trivial,
                 top_level_only=args.top_level_only,
                 strict=args.strict,
                 scan_errors=scan_errors,

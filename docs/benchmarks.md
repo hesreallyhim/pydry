@@ -20,7 +20,7 @@ Threshold `0.8`, minimum `2` statements, trivial bodies skipped, block size `6`.
 | asyncio | 983 | 617 | 1.3 s | 7 | 23 | 39 |
 | json | 31 | 27 | 0.1 s | 0 | 5 | 1 |
 | http | 230 | 183 | 0.5 s | 2 | 4 | 5 |
-| unittest | 2569 | 1599 | 3.5 s | 58 | 60 | 238 |
+| unittest | 2569 | 1599 | 3.5 s | 59 | 60 | 242 |
 | logging | 258 | 191 | 0.4 s | 1 | 4 | 14 |
 
 A full report over the entire standard library (about 14,400 functions after excluding test packages) takes about half a minute, most of it parsing and tokenizing; near matching uses a prefix filter so the pairwise stage stays well under ten seconds.

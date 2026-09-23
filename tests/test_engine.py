@@ -818,3 +818,46 @@ class RemainingBranchTests(RepoMixin, unittest.TestCase):
         self.assertEqual(
             to_jsonable({"names": frozenset({"b", "a"})}), {"names": ["a", "b"]}
         )
+
+
+class BlockLocationAndFilterTests(RepoMixin, unittest.TestCase):
+    def test_blocks_starting_at_a_case_header_report_real_lines(self) -> None:
+        body = """
+        def first(cmd):
+            match cmd:
+                case ["go", where]:
+                    a = prep(where)
+                    b = prep(a)
+                    log(b)
+                    store(b)
+                    emit(b)
+                    return b
+            return None
+
+        def second(cmd):
+            setup()
+            match cmd:
+                case ["go", where]:
+                    a = prep(where)
+                    b = prep(a)
+                    log(b)
+                    store(b)
+                    emit(b)
+                    return finish(b)
+            return None
+        """
+        root = self._make_repo({"a.py": body})
+        groups = block_clones(root, min_statements=6, near_threshold=1.0)
+        self.assertEqual(len(groups), 1)
+        for occurrence in groups[0].occurrences:
+            self.assertGreater(occurrence.lineno, 0)
+            self.assertLessEqual(occurrence.lineno, occurrence.end_lineno)
+        # The maximal run includes the ``match`` header on line 3 and ends at
+        # ``emit`` on line 9, before the returns diverge.
+        first = next(o for o in groups[0].occurrences if o.qualname == "first")
+        self.assertEqual((first.lineno, first.end_lineno), (3, 9))
+
+    def test_function_size_filter_applies_to_blocks(self) -> None:
+        root = self._make_repo({"a.py": LOADER_A, "b.py": BlockCloneTests.PIPELINE})
+        self.assertEqual(len(block_clones(root)), 1)
+        self.assertEqual(block_clones(root, min_function_statements=1000), [])

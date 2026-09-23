@@ -40,7 +40,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: pip install -e ".[dev]"
-      - run: pytest --tb=short
+      - run: pytest --tb=short --cov --cov-report=term
 
   pydry:
     name: pydry

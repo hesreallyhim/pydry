@@ -139,6 +139,23 @@ class BaselineTests(unittest.TestCase):
         self.assertTrue(accepted.accepts_block(two))
         self.assertFalse(accepted.accepts_block(three))
 
+    def test_failed_refresh_preserves_the_existing_baseline(self) -> None:
+        root = self._make_repo({"a.py": DUPLICATE, "b.py": OTHER})
+        baseline = root / ".pydry-baseline.json"
+        self._run(root, baseline_path=baseline, update_baseline=True)
+        before = baseline.read_text(encoding="utf-8")
+        (root / "broken.py").write_text("def broken(:\n", encoding="utf-8")
+
+        code, stdout, stderr, _ = self._run(
+            root, baseline_path=baseline, update_baseline=True
+        )
+
+        self.assertEqual(code, 1)
+        self.assertIn("not updated", stderr)
+        self.assertNotIn("Baseline written", stdout)
+        self.assertEqual(baseline.read_text(encoding="utf-8"), before)
+        self.assertEqual(len(load_baseline(baseline).exact), 1)
+
     def test_missing_baseline_warns_and_evaluates_everything(self) -> None:
         root = self._make_repo({"a.py": DUPLICATE, "b.py": OTHER})
         code, _, stderr, payload = self._run(root, baseline_path=root / "absent.json")

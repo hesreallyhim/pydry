@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 from .canonical import StmtToken, is_trivial, statement_tokens
 from .models import FunctionOccurrence
-from .normalize import FunctionNormalizer, bound_names
+from .normalize import FunctionNormalizer, all_bindings
 
 if TYPE_CHECKING:
     from collections.abc import Generator, Iterable, Sequence
@@ -178,7 +178,7 @@ def _counter_jaccard(a: Counter[str], b: Counter[str]) -> float:
 
 def extract_features(fn: _FuncNode) -> dict[str, Any]:
     call_names = Counter(_call_name(n) for n in ast.walk(fn) if isinstance(n, ast.Call))
-    local = bound_names(fn)
+    local = all_bindings(fn)
     external_names = frozenset(
         n.id
         for n in ast.walk(fn)

@@ -87,6 +87,8 @@ def block_clones(
     *,
     min_statements: int = DEFAULT_BLOCK_MIN_STATEMENTS,
     near_threshold: float = DEFAULT_THRESHOLD,
+    min_function_statements: int = 0,
+    ignore_trivial: bool = False,
     top_level_only: bool = False,
     strict: bool = False,
     scan_errors: list[str] | None = None,
@@ -96,7 +98,10 @@ def block_clones(
     """Find runs of ``min_statements`` or more statements repeated verbatim.
 
     Runs are compared on the fully normalized statement form, so renamed
-    locals and changed constants still match. Every window of
+    locals and changed constants still match. ``min_function_statements`` and
+    ``ignore_trivial`` apply the same function filter the other analyses use,
+    so a function too small or too trivial to analyze cannot contribute a
+    block either. Every window of
     ``min_statements`` tokens is hashed; windows that hash the same are
     extended in both directions to a maximal run, and runs are grouped by
     content. Nested runs already inside a longer reported run are dropped.
@@ -132,7 +137,14 @@ def block_clones(
         exclude=exclude,
     )
     items = sorted(
-        (p for p in items if p.stmt_count >= min_statements),
+        (
+            p
+            for p in items
+            if p.stmt_count >= min_statements
+            and p.eligible(
+                min_statements=min_function_statements, ignore_trivial=ignore_trivial
+            )
+        ),
         key=lambda p: (p.occurrence.path, p.occurrence.lineno),
     )
     k = min_statements

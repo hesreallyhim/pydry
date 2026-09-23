@@ -265,6 +265,8 @@ def run_check(
                 root,
                 min_statements=config.block_min_statements,
                 near_threshold=config.threshold,
+                min_function_statements=config.min_statements,
+                ignore_trivial=config.ignore_trivial,
                 profiles=profiles,
             ),
             near_rows,
@@ -282,19 +284,32 @@ def run_check(
     ]
 
     baseline: Baseline | None = None
+    diagnostics_fail = bool(
+        (config.fail_on_scan_errors and scan_errors)
+        or (config.fail_on_plugin_errors and plugin_errors)
+    )
     if update_baseline:
         target = baseline_path or Path(".pydry-baseline.json")
-        try:
-            write_baseline(
-                target,
-                exact_rows=exact_rows,
-                near_rows=near_rows,
-                block_rows=block_rows,
+        if diagnostics_fail:
+            # Findings from a partial scan must not replace an accepted set.
+            print(
+                f"Baseline {target} not updated: analysis reported errors.",
+                file=sys.stderr,
             )
-        except OSError as exc:
-            print(f"Error: Could not write baseline {target}: {exc}", file=sys.stderr)
-            return 2
-        print(f"Baseline written to {target}")
+        else:
+            try:
+                write_baseline(
+                    target,
+                    exact_rows=exact_rows,
+                    near_rows=near_rows,
+                    block_rows=block_rows,
+                )
+            except OSError as exc:
+                print(
+                    f"Error: Could not write baseline {target}: {exc}", file=sys.stderr
+                )
+                return 2
+            print(f"Baseline written to {target}")
         baseline_path = target
     if baseline_path is not None and baseline_path.is_file():
         try:

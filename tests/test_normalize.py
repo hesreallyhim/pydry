@@ -11,7 +11,14 @@ from __future__ import annotations
 import ast
 import unittest
 
-from pydry.normalize import ConstantNormalizer, FunctionNormalizer, LocalNameNormalizer
+from pydry.normalize import (
+    ConstantNormalizer,
+    FunctionNormalizer,
+    LocalNameNormalizer,
+    all_bindings,
+    bound_names,
+    is_placeholder,
+)
 
 
 def _parse_func(src: str) -> ast.FunctionDef | ast.AsyncFunctionDef:
@@ -61,7 +68,7 @@ class TestLocalNameNormalizerVisitors(unittest.TestCase):
         normalizer = LocalNameNormalizer()
         arg_node = ast.arg(arg="my_param", annotation=None)
         result = normalizer.visit_arg(arg_node)
-        self.assertEqual(result.arg, "v0")
+        self.assertEqual(result.arg, "«v0»")
 
     def test_visit_arg_preserves_self(self) -> None:
         normalizer = LocalNameNormalizer()
@@ -86,7 +93,7 @@ def f():
         self.assertIsNotNone(handlers[0].name)
         name = handlers[0].name
         assert name is not None
-        self.assertTrue(name.startswith("v"))
+        self.assertTrue(is_placeholder(name))
 
     def test_visit_except_handler_preserves_none_name(self) -> None:
         """ExceptHandler with no 'as' name should remain None."""
@@ -207,8 +214,8 @@ class TestFunctionNormalizerAnnotations(unittest.TestCase):
         fn = _parse_func(src)
         normalizer = FunctionNormalizer(normalize_arg_names=True)
         result = normalizer.visit(fn)
-        self.assertEqual(result.args.vararg.arg, "vararg")
-        self.assertEqual(result.args.kwarg.arg, "kwarg")
+        self.assertEqual(result.args.vararg.arg, "«arg0»")
+        self.assertEqual(result.args.kwarg.arg, "«arg1»")
 
     def test_preserve_function_name(self) -> None:
         src = "def my_special_function():\n    return 1\n"
@@ -249,7 +256,7 @@ class TestFunctionNormalizerAnnotations(unittest.TestCase):
         # Verify that local names are normalized (Name nodes have token IDs)
         names = [n.id for n in ast.walk(result) if isinstance(n, ast.Name)]
         # All should be token-style names like v0, v1...
-        self.assertTrue(any(name.startswith("v") for name in names))
+        self.assertTrue(any(is_placeholder(name) for name in names))
 
     def test_normalize_constants_applied(self) -> None:
         src = "def f():\n    return 42\n"
@@ -268,3 +275,118 @@ class TestFunctionNormalizerAnnotations(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ScopeAwareNormalizationTests(unittest.TestCase):
+    """Bindings respect lexical scope and generated names cannot collide."""
+
+    def _canonical(self, src: str, **opts: bool) -> str:
+        from pydry.analyze import canonicalize
+
+        return canonicalize(_parse_func(src), **opts)
+
+    def test_parameter_named_like_a_placeholder_still_matches(self) -> None:
+        first = "def first(value):\n    output = transform(value)\n    return output\n"
+        for name in ("arg0", "vararg", "kwarg", "v0"):
+            second = (
+                f"def second({name}):\n"
+                f"    output = transform({name})\n"
+                "    return output\n"
+            )
+            with self.subTest(name=name):
+                self.assertEqual(
+                    self._canonical(first, normalize_local_names=True),
+                    self._canonical(second, normalize_local_names=True),
+                )
+                self.assertEqual(self._canonical(first), self._canonical(second))
+
+    def test_parameter_names_are_ignored_at_the_identical_tier(self) -> None:
+        a = "def f(x, *rest, **extra):\n    return helper(x, rest, extra)\n"
+        b = "def g(y, *others, **more):\n    return helper(y, others, more)\n"
+        self.assertEqual(self._canonical(a), self._canonical(b))
+        c = "def h(x, *rest, **extra):\n    return other(x, rest, extra)\n"
+        self.assertNotEqual(self._canonical(a), self._canonical(c))
+
+    def test_comprehension_targets_do_not_make_external_calls_local(self) -> None:
+        a = (
+            "def f(items):\n"
+            "    names = [format for format in items]\n"
+            "    result = format(items)\n"
+            "    return names, result\n"
+        )
+        b = a.replace("result = format(items)", "result = process(items)")
+        self.assertNotEqual(
+            self._canonical(a, normalize_local_names=True),
+            self._canonical(b, normalize_local_names=True),
+        )
+        # The comprehension variable itself is still normalized.
+        c = a.replace("[format for format in items]", "[entry for entry in items]")
+        self.assertEqual(
+            self._canonical(a, normalize_local_names=True),
+            self._canonical(c, normalize_local_names=True),
+        )
+
+    def test_nested_function_locals_do_not_leak_into_the_outer_scope(self) -> None:
+        a = (
+            "def f(items):\n"
+            "    def inner(item):\n"
+            "        total = weigh(item)\n"
+            "        return total\n"
+            "    return total(items) + inner(items)\n"
+        )
+        b = a.replace("return total(items)", "return count(items)")
+        self.assertNotEqual(
+            self._canonical(a, normalize_local_names=True),
+            self._canonical(b, normalize_local_names=True),
+        )
+        c = a.replace("total = weigh(item)", "acc = weigh(item)").replace(
+            "        return total\n", "        return acc\n"
+        )
+        self.assertEqual(
+            self._canonical(a, normalize_local_names=True),
+            self._canonical(c, normalize_local_names=True),
+        )
+
+    def test_lambda_parameters_are_scoped_and_normalized(self) -> None:
+        a = "def f(rows):\n    return sorted(rows, key=lambda row: row.score)\n"
+        b = "def f(rows):\n    return sorted(rows, key=lambda r: r.score)\n"
+        self.assertEqual(
+            self._canonical(a, normalize_local_names=True),
+            self._canonical(b, normalize_local_names=True),
+        )
+        # At the identical tier a lambda parameter shadowing a function
+        # parameter is left alone rather than renamed as the parameter.
+        c = "def f(x):\n    return apply(lambda x: x + 1, x)\n"
+        rendered = self._canonical(c)
+        self.assertIn(
+            "Lambda(args=arguments(posonlyargs=[], args=[arg(arg='x')]", rendered
+        )
+
+    def test_nested_global_and_nonlocal_declarations_are_respected(self) -> None:
+        a = (
+            "def f():\n"
+            "    total = 0\n"
+            "    def inner():\n"
+            "        nonlocal total\n"
+            "        total = total + 1\n"
+            "        global counter\n"
+            "        counter = counter + 1\n"
+            "    inner()\n"
+            "    return total\n"
+        )
+        rendered = self._canonical(a, normalize_local_names=True)
+        self.assertIn("Name(id='counter'", rendered)
+        self.assertNotIn("Name(id='total'", rendered)
+
+    def test_bound_names_versus_all_bindings(self) -> None:
+        fn = _parse_func(
+            "def f(a):\n"
+            "    b = [c for c in a if (d := c)]\n"
+            "    e = lambda g: g\n"
+            "    def inner(h):\n"
+            "        i = h\n"
+            "    return b, e\n"
+        )
+        scoped = bound_names(fn)
+        self.assertEqual(scoped, frozenset({"a", "b", "d", "e", "inner"}))
+        self.assertTrue({"c", "g", "h", "i"} <= all_bindings(fn))

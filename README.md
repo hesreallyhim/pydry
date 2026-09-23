@@ -128,7 +128,7 @@ max_block_clones = 0        # fail on any repeated block
 max_abstract_candidates = "none"   # report near matches, do not enforce
 ```
 
-With a baseline, `check` only counts findings that are not already recorded, so an existing codebase can adopt pydry without first paying down every duplicate. Run `pydry check --update-baseline` to accept the current state, commit the file, and the check will fail only on new duplication. Baselines are keyed on the content of the duplicated code and record how many copies were accepted, so a baselined finding resurfaces once either side is edited or another copy appears.
+With a baseline, `check` only counts findings that are not already recorded, so an existing codebase can adopt pydry without first paying down every duplicate. Run `pydry check --update-baseline` to accept the current state, commit the file, and the check will fail only on new duplication. Baselines are keyed on the normalized content of the duplicated code and record how many copies were accepted. An accepted finding resurfaces when another copy appears or when a copy changes structurally; renaming locals or changing literal values in an accepted copy keeps it accepted, because those differences are normalized away.
 
 Profiles set defaults for the sensitivity knobs; explicit keys override them:
 
@@ -144,7 +144,7 @@ Not every project weights DRYness the same way. Test suites in particular are re
 
 Every analysis command accepts:
 
-- `--min-statements N`: ignore functions with fewer statements (default `2`).
+- `--min-statements N`: ignore functions with fewer statements in every analysis, including block detection (default `2`).
 - `--no-ignore-trivial`: also analyze stubs, accessors, and call-free boilerplate.
 - `--exclude GLOB`: skip paths matching a glob relative to the root; repeatable.
 - `--top-level-only`: ignore nested functions and methods.

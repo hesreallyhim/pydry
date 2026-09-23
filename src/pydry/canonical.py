@@ -6,8 +6,9 @@ test, the ``for`` target and iterable, and so on) followed by their children at
 the next depth. Each token carries three canonical strings:
 
 - ``raw``: docstrings, annotations, and decorators removed, nothing else.
-- ``names``: additionally, names bound inside the function are replaced by
-  positional placeholders, numbered per statement.
+- ``names``: additionally, names bound inside the function (or in a
+  comprehension or lambda within the statement) are replaced by positional
+  placeholders, numbered per statement.
 - ``full``: additionally, constants are replaced by typed placeholders.
 - ``loose``: local names, literals, and ``UPPER_CASE`` module constants
   collapse to a single placeholder, so a parameter, a literal, and a named
@@ -22,11 +23,15 @@ from __future__ import annotations
 
 import ast
 import copy
-import keyword
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from .normalize import ConstantNormalizer, bound_names
+from .normalize import (
+    ConstantNormalizer,
+    LocalNameNormalizer,
+    bound_names,
+    is_placeholder,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -60,77 +65,6 @@ class StmtToken:
         return (self.depth, self.loose)
 
 
-class _StatementNormalizer(ast.NodeTransformer):
-    """Replace function-local names with per-statement placeholders."""
-
-    def __init__(self, bound: frozenset[str]) -> None:
-        self.bound = bound
-        self.mapping: dict[str, str] = {}
-
-    def _placeholder(self, name: str) -> str:
-        if name not in self.mapping:
-            self.mapping[name] = f"v{len(self.mapping)}"
-        return self.mapping[name]
-
-    def _is_local(self, name: str) -> bool:
-        if keyword.iskeyword(name) or name in {"self", "cls"}:
-            return False
-        return name in self.bound
-
-    def visit_Name(self, node: ast.Name) -> ast.Name:
-        if not self._is_local(node.id):
-            return node
-        return ast.copy_location(
-            ast.Name(id=self._placeholder(node.id), ctx=node.ctx), node
-        )
-
-    def visit_arg(self, node: ast.arg) -> ast.arg:
-        node.annotation = None
-        node.type_comment = None
-        if self._is_local(node.arg):
-            node.arg = self._placeholder(node.arg)
-        return node
-
-    def _rename_field(self, node: ast.AST, field: str) -> ast.AST:
-        """Visit children, then rename the binding stored in ``field``."""
-
-        self.generic_visit(node)
-        name = getattr(node, field)
-        if name and self._is_local(name):
-            setattr(node, field, self._placeholder(name))
-        return node
-
-    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> ast.AST:
-        return self._rename_field(node, "name")
-
-    def visit_MatchAs(self, node: ast.MatchAs) -> ast.AST:
-        return self._rename_field(node, "name")
-
-    def visit_MatchStar(self, node: ast.MatchStar) -> ast.AST:
-        return self._rename_field(node, "name")
-
-    def visit_MatchMapping(self, node: ast.MatchMapping) -> ast.AST:
-        return self._rename_field(node, "rest")
-
-    def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.AST:
-        return self._rename_field(node, "name")
-
-    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> ast.AST:
-        return self._rename_field(node, "name")
-
-    def visit_ClassDef(self, node: ast.ClassDef) -> ast.AST:
-        return self._rename_field(node, "name")
-
-    def visit_alias(self, node: ast.alias) -> ast.alias:
-        return node
-
-    def visit_Global(self, node: ast.Global) -> ast.Global:
-        return node
-
-    def visit_Nonlocal(self, node: ast.Nonlocal) -> ast.Nonlocal:
-        return node
-
-
 def _looks_like_constant(name: str) -> bool:
     """``UPPER_CASE`` identifiers are treated as constants by convention."""
 
@@ -141,8 +75,7 @@ class _SlotNormalizer(ast.NodeTransformer):
     """Collapse placeholders and constants into one slot marker."""
 
     def visit_Name(self, node: ast.Name) -> ast.Name:
-        placeholder = node.id.startswith("v") and node.id[1:].isdigit()
-        if placeholder or _looks_like_constant(node.id):
+        if is_placeholder(node.id) or _looks_like_constant(node.id):
             return ast.copy_location(ast.Name(id="_", ctx=node.ctx), node)
         return node
 
@@ -199,12 +132,24 @@ def _header(stmt: ast.stmt) -> ast.stmt:
     return copy.deepcopy(shallow)
 
 
+def _lineno(node: ast.AST) -> int:
+    """Line of ``node``, or of its first located descendant.
+
+    ``match_case`` carries no location of its own; its pattern does.
+    """
+
+    for candidate in ast.walk(node):
+        line = getattr(candidate, "lineno", None)
+        if line:
+            return int(line)
+    return 0
+
+
 def _first_child_line(stmt: ast.stmt) -> int | None:
     for name in ("body", "handlers", "cases"):
         children = getattr(stmt, name, None)
         if children:
-            first = children[0]
-            return int(getattr(first, "lineno", 0)) or None
+            return _lineno(children[0]) or None
     return None
 
 
@@ -215,7 +160,7 @@ def _token_for(stmt: ast.stmt, depth: int, bound: frozenset[str]) -> StmtToken |
     # each transformer pass.
     header = _AnnotationStripper().visit(_header(stmt))
     raw = ast.dump(header, annotate_fields=False)
-    renamed = _StatementNormalizer(bound).visit(header)
+    renamed = LocalNameNormalizer(bound=bound).visit(header)
     names = ast.dump(renamed, annotate_fields=False)
     abstracted = ConstantNormalizer().visit(renamed)
     full = ast.dump(abstracted, annotate_fields=False)
@@ -223,7 +168,7 @@ def _token_for(stmt: ast.stmt, depth: int, bound: frozenset[str]) -> StmtToken |
 
     is_compound = any(getattr(stmt, name, None) for name in _COMPOUND_FIELDS)
     calls = sum(1 for node in ast.walk(header) if isinstance(node, ast.Call))
-    lineno = int(getattr(stmt, "lineno", 0))
+    lineno = _lineno(stmt)
     end_lineno = int(getattr(stmt, "end_lineno", None) or lineno)
     if is_compound:
         child_line = _first_child_line(stmt)
