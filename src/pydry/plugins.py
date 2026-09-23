@@ -26,7 +26,6 @@ class PairPluginResult:
     metadata: dict[str, Any] = field(default_factory=dict)
     suggested_refactor_kind: str | None = None
     refactorability_delta: float = 0.0
-    abstract_template: str | None = None
 
 
 class PairPlugin(Protocol):
@@ -95,8 +94,6 @@ def apply_pair_plugins(
             and merged.suggested_refactor_kind is None
         ):
             merged.suggested_refactor_kind = result.suggested_refactor_kind
-        if result.abstract_template is not None and merged.abstract_template is None:
-            merged.abstract_template = result.abstract_template
     merged.pattern_labels = _uniq(merged.pattern_labels)
     merged.key_differences = _uniq(merged.key_differences)
     merged.risk_flags = _uniq(merged.risk_flags)

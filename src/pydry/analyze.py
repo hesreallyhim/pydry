@@ -1,31 +1,43 @@
 from __future__ import annotations
 
 import ast
+import builtins
+import copy
+import fnmatch
 import os
 from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .canonical import StmtToken, is_trivial, statement_tokens
 from .models import FunctionOccurrence
-from .normalize import FunctionNormalizer
+from .normalize import FunctionNormalizer, all_bindings
 
 if TYPE_CHECKING:
-    from collections.abc import Generator, Iterable
+    from collections.abc import Generator, Iterable, Sequence
 
 _FuncNode = ast.FunctionDef | ast.AsyncFunctionDef
 
 SIDE_EFFECT_CALLS = {
     "print",
-    "open",
     "write",
+    "writelines",
     "send",
+    "sendall",
     "post",
     "put",
+    "patch",
     "delete",
     "remove",
     "unlink",
+    "rmtree",
     "save",
     "commit",
+    "execute",
+    "mkdir",
+    "makedirs",
+    "rename",
 }
 CONTROL_FLOW_NODES = (
     ast.If,
@@ -36,31 +48,6 @@ CONTROL_FLOW_NODES = (
     ast.With,
     ast.AsyncWith,
     ast.Match,
-)
-STMT_TYPES = (
-    ast.Assign,
-    ast.AnnAssign,
-    ast.AugAssign,
-    ast.Return,
-    ast.Expr,
-    ast.If,
-    ast.For,
-    ast.AsyncFor,
-    ast.While,
-    ast.Try,
-    ast.With,
-    ast.AsyncWith,
-    ast.Raise,
-    ast.Assert,
-    ast.Pass,
-    ast.Break,
-    ast.Continue,
-    ast.Import,
-    ast.ImportFrom,
-    ast.Delete,
-    ast.Match,
-    ast.Yield,
-    ast.YieldFrom,
 )
 
 DEFAULT_EXCLUDED_DIRS = {
@@ -80,15 +67,42 @@ DEFAULT_EXCLUDED_DIRS = {
     ".eggs",
 }
 
+_BUILTIN_NAMES = frozenset(dir(builtins))
 
-def iter_python_files(root: Path) -> Iterable[Path]:
+
+def _excluded(relative: str, patterns: Sequence[str]) -> bool:
+    return any(
+        fnmatch.fnmatch(relative, pattern) or fnmatch.fnmatch(relative, f"{pattern}/*")
+        for pattern in patterns
+    )
+
+
+def iter_python_files(root: Path, exclude: Sequence[str] = ()) -> Iterable[Path]:
+    """Yield Python files under ``root`` in a stable order.
+
+    ``exclude`` holds glob patterns matched against paths relative to ``root``
+    using forward slashes; a pattern matching a directory excludes its
+    contents.
+    """
+
     for dirpath, dirnames, filenames in os.walk(root, topdown=True):
-        dirnames[:] = sorted(d for d in dirnames if d not in DEFAULT_EXCLUDED_DIRS)
+        kept = []
+        for name in sorted(dirnames):
+            if name in DEFAULT_EXCLUDED_DIRS:
+                continue
+            relative = Path(dirpath, name).relative_to(root).as_posix()
+            if exclude and _excluded(relative, exclude):
+                continue
+            kept.append(name)
+        dirnames[:] = kept
         for filename in sorted(filenames):
-            if filename.endswith(".py"):
-                path = Path(dirpath, filename)
-                if path.is_file():
-                    yield path
+            if not filename.endswith(".py"):
+                continue
+            path = Path(dirpath, filename)
+            if exclude and _excluded(path.relative_to(root).as_posix(), exclude):
+                continue
+            if path.is_file():
+                yield path
 
 
 def build_qualname(parents: list[str], name: str) -> str:
@@ -133,9 +147,7 @@ def is_method(parents: list[str]) -> bool:
 
 
 def canonicalize(fn: _FuncNode, **opts: Any) -> str:
-    cloned = ast.fix_missing_locations(ast.parse(ast.unparse(fn)).body[0])
-    norm = FunctionNormalizer(**opts)
-    cloned = ast.fix_missing_locations(norm.visit(cloned))
+    cloned = FunctionNormalizer(**opts).visit(copy.deepcopy(fn))
     return ast.dump(cloned, annotate_fields=True, include_attributes=False)
 
 
@@ -155,32 +167,6 @@ def _call_name(node: ast.Call) -> str:
     return "<dynamic>"
 
 
-def _literal_token(value: object) -> str:
-    if isinstance(value, str):
-        return f"str:{value}"
-    if isinstance(value, bytes):
-        return f"bytes:{value!r}"
-    if value is None:
-        return "none"
-    if isinstance(value, bool):
-        return f"bool:{value}"
-    if isinstance(value, int):
-        return f"int:{value}"
-    if isinstance(value, float):
-        return f"float:{value!r}"
-    if isinstance(value, complex):
-        return f"complex:{value!r}"
-    return f"type:{type(value).__name__}"
-
-
-def _stmt_sequence(fn: _FuncNode) -> list[str]:
-    seq = []
-    for n in ast.walk(fn):
-        if isinstance(n, STMT_TYPES):
-            seq.append(type(n).__name__)
-    return seq
-
-
 def _counter_jaccard(a: Counter[str], b: Counter[str]) -> float:
     keys = set(a) | set(b)
     if not keys:
@@ -190,48 +176,22 @@ def _counter_jaccard(a: Counter[str], b: Counter[str]) -> float:
     return inter / union if union else 1.0
 
 
-def _lcs_ratio(a: list[str], b: list[str]) -> float:
-    if not a and not b:
-        return 1.0
-    if not a or not b:
-        return 0.0
-    longer = a
-    shorter = b
-    if len(shorter) > len(longer):
-        longer, shorter = shorter, longer
-
-    prev = [0] * (len(shorter) + 1)
-    for token in longer:
-        current = [0] * (len(shorter) + 1)
-        for j, short_token in enumerate(shorter, start=1):
-            if token == short_token:
-                current[j] = prev[j - 1] + 1
-            else:
-                current[j] = max(prev[j], current[j - 1])
-        prev = current
-
-    lcs = prev[-1]
-    return (2 * lcs) / (len(a) + len(b))
-
-
 def extract_features(fn: _FuncNode) -> dict[str, Any]:
-    node_types = Counter(type(n).__name__ for n in ast.walk(fn))
-    stmt_seq = _stmt_sequence(fn)
     call_names = Counter(_call_name(n) for n in ast.walk(fn) if isinstance(n, ast.Call))
-    literal_tokens = Counter(
-        _literal_token(n.value) for n in ast.walk(fn) if isinstance(n, ast.Constant)
-    )
-    external_names = Counter(
+    local = all_bindings(fn)
+    external_names = frozenset(
         n.id
         for n in ast.walk(fn)
-        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
+        if isinstance(n, ast.Name)
+        and isinstance(n.ctx, ast.Load)
+        and n.id not in local
+        and n.id not in _BUILTIN_NAMES
     )
     has_yield = any(isinstance(n, (ast.Yield, ast.YieldFrom)) for n in ast.walk(fn))
     has_await = any(isinstance(n, ast.Await) for n in ast.walk(fn))
     control_count = sum(1 for n in ast.walk(fn) if isinstance(n, CONTROL_FLOW_NODES))
     returns = sum(1 for n in ast.walk(fn) if isinstance(n, ast.Return))
     raises = sum(1 for n in ast.walk(fn) if isinstance(n, ast.Raise))
-    literals = sum(literal_tokens.values())
     side_effect_calls = sorted(
         {name for name in call_names if name.split(".")[-1] in SIDE_EFFECT_CALLS}
     )
@@ -273,8 +233,6 @@ def extract_features(fn: _FuncNode) -> dict[str, Any]:
             candidate = candidate.body
 
     return {
-        "node_types": node_types,
-        "stmt_seq": stmt_seq,
         "call_names": call_names,
         "external_names": external_names,
         "param_count": param_count(fn),
@@ -283,8 +241,6 @@ def extract_features(fn: _FuncNode) -> dict[str, Any]:
         "control_count": control_count,
         "returns": returns,
         "raises": raises,
-        "literals": literals,
-        "literal_tokens": literal_tokens,
         "side_effect_calls": side_effect_calls,
         "is_wrapper": is_wrapper,
         "wrapper_target": wrapper_target,
@@ -292,7 +248,6 @@ def extract_features(fn: _FuncNode) -> dict[str, Any]:
         "passthrough_args": passthrough_args,
         "returns_lambda": returns_lambda,
         "curry_depth": curry_depth,
-        "stmt_count": len(stmt_seq),
     }
 
 
@@ -302,6 +257,7 @@ def occurrence_for(
     parents: list[str],
     *,
     is_method_flag: bool | None = None,
+    stmt_count: int = 0,
 ) -> FunctionOccurrence:
     resolved_is_method = (
         is_method(parents) if is_method_flag is None else is_method_flag
@@ -316,4 +272,47 @@ def occurrence_for(
         kind="async def" if isinstance(fn, ast.AsyncFunctionDef) else "def",
         param_count=param_count(fn),
         is_method=resolved_is_method,
+        stmt_count=stmt_count,
+    )
+
+
+@dataclass
+class FunctionProfile:
+    """Everything the engine needs to know about one function."""
+
+    occurrence: FunctionOccurrence
+    node: _FuncNode
+    tokens: list[StmtToken]
+    features: dict[str, Any]
+    trivial: bool
+
+    def __post_init__(self) -> None:
+        self.keys: list[tuple[int, str]] = [token.key for token in self.tokens]
+        self.key_counts: dict[tuple[int, str], int] = dict(Counter(self.keys))
+        self.loose_keys: list[tuple[int, str]] = [t.loose_key for t in self.tokens]
+        self.loose_counts: dict[tuple[int, str], int] = dict(Counter(self.loose_keys))
+        self._hashes: dict[str, str] = {}
+
+    @property
+    def stmt_count(self) -> int:
+        return len(self.tokens)
+
+    def eligible(self, *, min_statements: int, ignore_trivial: bool) -> bool:
+        if self.stmt_count < min_statements:
+            return False
+        return not (ignore_trivial and self.trivial)
+
+
+def profile_function(
+    path: Path, fn: _FuncNode, parents: list[str], *, is_method_flag: bool
+) -> FunctionProfile:
+    tokens = statement_tokens(fn)
+    return FunctionProfile(
+        occurrence=occurrence_for(
+            path, fn, parents, is_method_flag=is_method_flag, stmt_count=len(tokens)
+        ),
+        node=fn,
+        tokens=tokens,
+        features=extract_features(fn),
+        trivial=is_trivial(tokens),
     )

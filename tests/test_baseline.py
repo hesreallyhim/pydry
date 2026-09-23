@@ -1,0 +1,361 @@
+"""Tests for baselines, profiles, and exclusions in the check command."""
+
+from __future__ import annotations
+
+import io
+import json
+import tempfile
+import textwrap
+import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
+
+from pydry.baseline import load_baseline
+from pydry.check import run_check
+from pydry.cli import main
+from pydry.config import CheckConfig, ConfigError, apply_overrides, load_check_config
+
+DUPLICATE = """
+def first(value):
+    result = normalize(value) + 1
+    return result
+"""
+
+OTHER = """
+def second(item):
+    output = normalize(item) + 1
+    return output
+"""
+
+THIRD = """
+def third(thing):
+    payload = normalize(thing) + 1
+    return payload
+"""
+
+
+class BaselineTests(unittest.TestCase):
+    def _make_repo(self, files: dict[str, str]) -> Path:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        for name, content in files.items():
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(textwrap.dedent(content), encoding="utf-8")
+        return root
+
+    def _run(self, root: Path, **kwargs: object) -> tuple[int, str, str, dict]:  # type: ignore[type-arg]
+        report = root / "report.json"
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            code = run_check(
+                root=root,
+                config=CheckConfig(strict=False),
+                output_path=report,
+                github=False,
+                **kwargs,  # type: ignore[arg-type]
+            )
+        payload = (
+            json.loads(report.read_text(encoding="utf-8"))["results"]
+            if report.is_file()
+            else {}
+        )
+        return code, stdout.getvalue(), stderr.getvalue(), payload
+
+    def test_update_baseline_accepts_current_findings_and_passes(self) -> None:
+        root = self._make_repo({"a.py": DUPLICATE, "b.py": OTHER})
+        baseline = root / ".pydry-baseline.json"
+
+        code, stdout, _, payload = self._run(
+            root, baseline_path=baseline, update_baseline=True
+        )
+
+        self.assertEqual(code, 0)
+        self.assertIn(f"Baseline written to {baseline}", stdout)
+        recorded = load_baseline(baseline)
+        self.assertEqual(len(recorded.exact), 1)
+        self.assertTrue(payload["baseline"]["applied"])
+        self.assertEqual(payload["baseline"]["new"]["exact"], 0)
+        self.assertTrue(payload["exact"][0]["baselined"])
+
+    def test_existing_baseline_suppresses_known_findings_only(self) -> None:
+        root = self._make_repo({"a.py": DUPLICATE, "b.py": OTHER})
+        baseline = root / ".pydry-baseline.json"
+        self._run(root, baseline_path=baseline, update_baseline=True)
+
+        code, _, _, _ = self._run(root, baseline_path=baseline)
+        self.assertEqual(code, 0)
+
+        (root / "c.py").write_text(
+            textwrap.dedent(
+                """
+                def alpha(x):
+                    value = transform(x)
+                    if value:
+                        return value * 2
+                    return None
+
+                def beta(y):
+                    result = transform(y)
+                    if result:
+                        return result * 2
+                    return None
+                """
+            )
+        )
+        code, stdout, stderr, payload = self._run(root, baseline_path=baseline)
+        self.assertEqual(code, 1)
+        self.assertIn("new: exact=1", stdout)
+        self.assertIn("policy allows 0", stderr)
+        self.assertEqual(payload["summary"]["exact_group_count"], 2)
+        self.assertEqual(payload["baseline"]["new"]["exact"], 1)
+        flags = sorted(group["baselined"] for group in payload["exact"])
+        self.assertEqual(flags, [False, True])
+
+    def test_additional_copies_of_an_accepted_group_are_new_findings(self) -> None:
+        root = self._make_repo({"a.py": DUPLICATE, "b.py": OTHER})
+        baseline = root / ".pydry-baseline.json"
+        self._run(root, baseline_path=baseline, update_baseline=True)
+        (root / "c.py").write_text(textwrap.dedent(THIRD), encoding="utf-8")
+
+        code, stdout, _, payload = self._run(root, baseline_path=baseline)
+
+        self.assertEqual(code, 1)
+        self.assertIn("new: exact=1", stdout)
+        self.assertEqual(payload["summary"]["exact_group_count"], 1)
+        self.assertFalse(payload["exact"][0]["baselined"])
+        self.assertEqual(payload["exact"][0]["count"], 3)
+
+    def test_block_baseline_records_occurrence_counts(self) -> None:
+        from pydry.baseline import Baseline
+        from pydry.models import BlockCloneGroup, BlockOccurrence
+
+        occ = BlockOccurrence("a.py", 1, 6, "f", 0, 6)
+        two = BlockCloneGroup("h", 6, 2, [occ, occ], 6, "")
+        three = BlockCloneGroup("h", 6, 3, [occ, occ, occ], 12, "")
+        accepted = Baseline(exact={}, near=frozenset(), blocks={"h": 2})
+        self.assertTrue(accepted.accepts_block(two))
+        self.assertFalse(accepted.accepts_block(three))
+
+    def test_failed_refresh_preserves_the_existing_baseline(self) -> None:
+        root = self._make_repo({"a.py": DUPLICATE, "b.py": OTHER})
+        baseline = root / ".pydry-baseline.json"
+        self._run(root, baseline_path=baseline, update_baseline=True)
+        before = baseline.read_text(encoding="utf-8")
+        (root / "broken.py").write_text("def broken(:\n", encoding="utf-8")
+
+        code, stdout, stderr, _ = self._run(
+            root, baseline_path=baseline, update_baseline=True
+        )
+
+        self.assertEqual(code, 1)
+        self.assertIn("not updated", stderr)
+        self.assertNotIn("Baseline written", stdout)
+        self.assertEqual(baseline.read_text(encoding="utf-8"), before)
+        self.assertEqual(len(load_baseline(baseline).exact), 1)
+
+    def test_missing_baseline_warns_and_evaluates_everything(self) -> None:
+        root = self._make_repo({"a.py": DUPLICATE, "b.py": OTHER})
+        code, _, stderr, payload = self._run(root, baseline_path=root / "absent.json")
+        self.assertEqual(code, 1)
+        self.assertIn("does not exist", stderr)
+        self.assertFalse(payload["baseline"]["applied"])
+
+    def test_malformed_baseline_is_an_execution_failure(self) -> None:
+        root = self._make_repo({"a.py": DUPLICATE, "b.py": OTHER})
+        baseline = root / "baseline.json"
+        baseline.write_text('{"version": 99}', encoding="utf-8")
+        code, _, stderr, _ = self._run(root, baseline_path=baseline)
+        self.assertEqual(code, 2)
+        self.assertIn("Unsupported baseline version", stderr)
+
+    def test_cli_wires_baseline_flags(self) -> None:
+        root = self._make_repo({"a.py": DUPLICATE, "b.py": OTHER})
+        baseline = root / "accepted.json"
+        report = root / "report.json"
+        stdout = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+            first = main(
+                [
+                    "check",
+                    str(root),
+                    "--no-strict",
+                    "--baseline",
+                    str(baseline),
+                    "--update-baseline",
+                    "--output",
+                    str(report),
+                ]
+            )
+            second = main(
+                [
+                    "check",
+                    str(root),
+                    "--no-strict",
+                    "--baseline",
+                    str(baseline),
+                    "--output",
+                    str(report),
+                ]
+            )
+            third = main(["check", str(root), "--no-strict", "--output", str(report)])
+        self.assertEqual((first, second, third), (0, 0, 1))
+
+
+class ZeroThresholdTests(unittest.TestCase):
+    def test_combined_commands_accept_a_zero_threshold(self) -> None:
+        demo = Path(__file__).resolve().parent.parent / "demo"
+        stdout = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+            code = main(["report", str(demo), "--threshold", "0"])
+        self.assertEqual(code, 0)
+        self.assertGreater(
+            json.loads(stdout.getvalue())["results"]["summary"]["near_count"], 0
+        )
+
+
+class ProfileAndExclusionTests(unittest.TestCase):
+    def _make_repo(self, files: dict[str, str]) -> Path:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        for name, content in files.items():
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(textwrap.dedent(content), encoding="utf-8")
+        return root
+
+    def test_profiles_set_defaults_that_explicit_keys_override(self) -> None:
+        root = self._make_repo(
+            {
+                "pydry.toml": """
+                profile = "lenient"
+                threshold = 0.9
+                """
+            }
+        )
+        config = load_check_config(root / "pydry.toml")
+        self.assertEqual(config.profile, "lenient")
+        self.assertEqual(config.threshold, 0.9)
+        self.assertEqual(config.min_statements, 4)
+        self.assertIsNone(config.max_block_clones)
+
+        strict = apply_overrides(CheckConfig(), profile="strict")
+        self.assertEqual(strict.max_abstract_candidates, 0)
+        self.assertEqual(strict.block_min_statements, 5)
+
+        # Switching profiles drops values inherited from the previous profile
+        # but keeps keys the user wrote explicitly.
+        switched = apply_overrides(config, profile="balanced")
+        self.assertEqual(switched.min_statements, 2)
+        self.assertEqual(switched.max_block_clones, 0)
+        self.assertEqual(switched.threshold, 0.9)
+        self.assertEqual(switched.profile, "balanced")
+        overridden = apply_overrides(config, profile="balanced", min_statements=3)
+        self.assertEqual(overridden.min_statements, 3)
+
+        with self.assertRaises(ConfigError):
+            apply_overrides(CheckConfig(), profile="unknown")
+
+    def test_exclude_and_baseline_keys_are_validated(self) -> None:
+        root = self._make_repo(
+            {
+                "pydry.toml": """
+                exclude = ["tests", "**/generated_*.py"]
+                baseline = ".pydry-baseline.json"
+                """
+            }
+        )
+        config = load_check_config(root / "pydry.toml")
+        self.assertEqual(config.exclude, ("tests", "**/generated_*.py"))
+        self.assertEqual(config.baseline, ".pydry-baseline.json")
+
+        (root / "pydry.toml").write_text('exclude = "tests"\n', encoding="utf-8")
+        with self.assertRaises(ConfigError):
+            load_check_config(root / "pydry.toml")
+        (root / "pydry.toml").write_text("baseline = 3\n", encoding="utf-8")
+        with self.assertRaises(ConfigError):
+            load_check_config(root / "pydry.toml")
+
+    def test_excluded_paths_are_not_scanned(self) -> None:
+        root = self._make_repo(
+            {
+                "src/a.py": DUPLICATE,
+                "tests/test_a.py": OTHER,
+                "src/gen/b.py": THIRD,
+            }
+        )
+        report = root / "report.json"
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            code = run_check(
+                root=root,
+                config=CheckConfig(strict=False, exclude=("tests", "src/gen")),
+                output_path=report,
+                github=False,
+            )
+        self.assertEqual(code, 0)
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            code = run_check(
+                root=root,
+                config=CheckConfig(strict=False, exclude=("tests",)),
+                output_path=report,
+                github=False,
+            )
+        self.assertEqual(code, 1)
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class BaselineFileTests(unittest.TestCase):
+    def test_load_rejects_unreadable_malformed_and_mistyped_files(self) -> None:
+        import tempfile
+
+        from pydry.baseline import load_baseline
+
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = Path(tmp) / "missing.json"
+            with self.assertRaisesRegex(ValueError, "Could not read baseline"):
+                load_baseline(missing)
+            bad_json = Path(tmp) / "bad.json"
+            bad_json.write_text("{not json", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "Invalid JSON"):
+                load_baseline(bad_json)
+            bad_key = Path(tmp) / "key.json"
+            bad_key.write_text('{"version": 2, "exact": ["abc"]}', encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "must map hashes to counts"):
+                load_baseline(bad_key)
+            bad_near = Path(tmp) / "near.json"
+            bad_near.write_text('{"version": 2, "near": "abc"}', encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "must be a list of strings"):
+                load_baseline(bad_near)
+            legacy = Path(tmp) / "legacy.json"
+            legacy.write_text('{"version": 1, "exact": []}', encoding="utf-8")
+            with self.assertRaisesRegex(
+                ValueError, "regenerate it with --update-baseline"
+            ):
+                load_baseline(legacy)
+
+    def test_update_baseline_write_failure_is_an_execution_error(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "a.py").write_text(DUPLICATE, encoding="utf-8")
+            blocker = root / "blocked"
+            blocker.write_text("not a directory", encoding="utf-8")
+            stderr = io.StringIO()
+            with redirect_stdout(io.StringIO()), redirect_stderr(stderr):
+                code = run_check(
+                    root=root,
+                    config=CheckConfig(strict=False),
+                    output_path=root / "report.json",
+                    github=False,
+                    baseline_path=blocker / "baseline.json",
+                    update_baseline=True,
+                )
+            self.assertEqual(code, 2)
+            self.assertIn("Could not write baseline", stderr.getvalue())

@@ -1,6 +1,5 @@
-"""Tests for pydry.analyze — edge cases in function iteration,
-LCS ratio, feature extraction, and occurrence construction.
-"""
+"""Tests for pydry.analyze: function iteration, feature extraction,
+occurrence construction, and file discovery."""
 
 from __future__ import annotations
 
@@ -9,10 +8,11 @@ import unittest
 from pathlib import Path
 
 from pydry.analyze import (
-    _lcs_ratio,
     extract_features,
     iter_functions,
+    iter_python_files,
     occurrence_for,
+    profile_function,
 )
 
 
@@ -85,34 +85,6 @@ def sync():
         self.assertEqual(results, [])
 
 
-class TestLcsRatio(unittest.TestCase):
-    """_lcs_ratio edge cases."""
-
-    def test_both_empty(self) -> None:
-        self.assertEqual(_lcs_ratio([], []), 1.0)
-
-    def test_one_empty(self) -> None:
-        self.assertEqual(_lcs_ratio(["a"], []), 0.0)
-        self.assertEqual(_lcs_ratio([], ["b"]), 0.0)
-
-    def test_identical_lists(self) -> None:
-        self.assertEqual(_lcs_ratio(["a", "b", "c"], ["a", "b", "c"]), 1.0)
-
-    def test_completely_different(self) -> None:
-        self.assertEqual(_lcs_ratio(["a", "b"], ["c", "d"]), 0.0)
-
-    def test_partial_overlap(self) -> None:
-        ratio = _lcs_ratio(["a", "b", "c"], ["a", "x", "c"])
-        # LCS is ["a", "c"] = 2, total = 3+3 = 6, ratio = 4/6 ~= 0.667
-        self.assertAlmostEqual(ratio, 4.0 / 6.0, places=5)
-
-    def test_shorter_first_arg(self) -> None:
-        """Verify the swap branch when shorter > longer is triggered."""
-        ratio = _lcs_ratio(["a", "b", "c", "d"], ["a", "c"])
-        self.assertGreater(ratio, 0.0)
-        self.assertLessEqual(ratio, 1.0)
-
-
 class TestExtractFeatures(unittest.TestCase):
     """Feature extraction edge cases: curry_depth, returns_lambda."""
 
@@ -183,6 +155,47 @@ def make_adder(x):
         features = extract_features(fn)
         self.assertTrue(features["has_await"])
 
+    def test_external_names_exclude_locals_and_builtins(self) -> None:
+        src = (
+            "def f(items):\n"
+            "    total = 0\n"
+            "    for x in items:\n"
+            "        total += helper(x, len(items), CONST)\n"
+            "    return total\n"
+        )
+        fn = _parse_func(src)
+        features = extract_features(fn)
+        self.assertEqual(features["external_names"], frozenset({"helper", "CONST"}))
+
+
+class TestProfileFunction(unittest.TestCase):
+    def test_profile_counts_statements_and_flags_trivial(self) -> None:
+        fn = _parse_func("def f(self):\n    return self._x\n")
+        profile = profile_function(Path("m.py"), fn, ["C"], is_method_flag=True)
+        self.assertEqual(profile.stmt_count, 1)
+        self.assertTrue(profile.trivial)
+        self.assertEqual(profile.occurrence.stmt_count, 1)
+        self.assertFalse(profile.eligible(min_statements=1, ignore_trivial=True))
+        self.assertTrue(profile.eligible(min_statements=1, ignore_trivial=False))
+
+
+class TestIterPythonFiles(unittest.TestCase):
+    def test_exclude_globs_skip_files_and_directories(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "pkg").mkdir()
+            (root / "pkg" / "a.py").write_text("x = 1\n")
+            (root / "pkg" / "generated_b.py").write_text("x = 1\n")
+            (root / "tests").mkdir()
+            (root / "tests" / "test_a.py").write_text("x = 1\n")
+            found = sorted(
+                p.relative_to(root).as_posix()
+                for p in iter_python_files(root, exclude=["tests", "pkg/generated_*"])
+            )
+            self.assertEqual(found, ["pkg/a.py"])
+
 
 class TestOccurrenceFor(unittest.TestCase):
     """occurrence_for edge cases: missing end_lineno, is_method_flag override."""
@@ -249,3 +262,12 @@ class TestOccurrenceFor(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CallNameTests(unittest.TestCase):
+    def test_dynamic_call_targets_are_labeled(self) -> None:
+        fn = _parse_func(
+            "def f(handlers):\n    return handlers[0](1) + (lambda: 2)()\n"
+        )
+        features = extract_features(fn)
+        self.assertEqual(features["call_names"]["<dynamic>"], 2)

@@ -285,3 +285,23 @@ class CheckConfigTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ConfigValidationCoverageTests(unittest.TestCase):
+    def test_profile_and_block_size_are_validated_in_files(self) -> None:
+        import tempfile
+
+        from pydry.config import ConfigError, apply_overrides, load_check_config
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "pydry.toml"
+            path.write_text('profile = "mystery"\n', encoding="utf-8")
+            with self.assertRaisesRegex(ConfigError, "profile must be one of"):
+                load_check_config(path)
+            path.write_text("block_min_statements = 1\n", encoding="utf-8")
+            with self.assertRaisesRegex(
+                ConfigError, "block_min_statements must be >= 2"
+            ):
+                load_check_config(path)
+        merged = apply_overrides(CheckConfig(), exclude=["tests", "docs"])
+        self.assertEqual(merged.exclude, ("tests", "docs"))

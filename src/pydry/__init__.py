@@ -1,5 +1,4 @@
+from ._version import __version__
 from .cli import main
-
-__version__ = "0.1.0"  # x-release-please-version
 
 __all__ = ["__version__", "main"]

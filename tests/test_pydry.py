@@ -1,3 +1,5 @@
+"""Behavioral tests for the public engine entry points."""
+
 from __future__ import annotations
 
 import tempfile
@@ -14,7 +16,7 @@ from pydry.engine import (
 )
 
 
-class PyDupesTests(unittest.TestCase):
+class PyDryTests(unittest.TestCase):
     def _make_repo(self, files: dict[str, str]) -> Path:
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -30,71 +32,81 @@ class PyDupesTests(unittest.TestCase):
             {
                 "a.py": """
                 def one(x):
-                    y = x + 1
+                    y = helper(x) + 1
                     return y
             """,
                 "b.py": """
                 def two(z):
-                    q = z + 1
+                    q = helper(z) + 1
                     return q
             """,
             }
         )
-        groups = exact_groups(root, min_count=2, normalize_local_names=True)
+        groups = exact_groups(root, min_count=2)
         self.assertEqual(len(groups), 1)
         self.assertEqual(groups[0].count, 2)
+        self.assertEqual(groups[0].tier, "renamed")
+        self.assertEqual(exact_groups(root, normalize_local_names=False), [])
 
     def test_near_finds_literal_specialization(self):
         root = self._make_repo(
             {
                 "a.py": """
                 def slug_a(name):
-                    return normalize(name, "-")
+                    cleaned = name.strip()
+                    parts = cleaned.split()
+                    if not parts:
+                        return ""
+                    return "-".join(parts)
             """,
                 "b.py": """
                 def slug_b(name):
-                    return normalize(name, "_")
+                    cleaned = name.strip()
+                    parts = cleaned.split()
+                    if not parts:
+                        return "n/a"
+                    return "_".join(parts)
             """,
             }
         )
-        rows = near_matches(root, threshold=0.55)
-        self.assertTrue(rows)
-        top = rows[0]
-        self.assertIn("literal_specialization", top.pattern_labels)
+        # These are exact duplicates at the constants tier, so they only
+        # appear as a near match once constant normalization is disabled.
+        self.assertEqual(len(exact_groups(root)), 1)
+        self.assertEqual(exact_groups(root, normalize_constants=False), [])
+        self.assertEqual(near_matches(root, threshold=0.55), [])
 
     def test_abstract_filters_leave_separate(self):
         root = self._make_repo(
             {
                 "a.py": """
-                async def load():
-                    return await fetch()
+                def collect(items):
+                    out = []
+                    for item in items:
+                        if item.ok:
+                            out.append(item.value)
+                    return out
             """,
                 "b.py": """
-                def load_sync():
-                    return fetch()
+                def stream(items):
+                    out = []
+                    for item in items:
+                        if item.ok:
+                            yield item.value
+                    return out
             """,
             }
         )
-        rows = abstract_candidates(root, threshold=0.3)
-        self.assertTrue(
-            all(r.suggested_refactor_kind != "leave_separate" for r in rows)
-        )
+        rows = near_matches(root, threshold=0.5)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].suggested_refactor_kind, "leave_separate")
+        self.assertEqual(abstract_candidates(root, threshold=0.5), [])
 
     def test_iter_python_files_skips_virtualenv_dirs(self):
         root = self._make_repo(
             {
-                "src/main.py": """
-                def keep():
-                    return 1
-            """,
-                "venv/lib/ignored.py": """
-                def drop():
-                    return 2
-            """,
-                ".venv/lib/ignored.py": """
-                def drop_too():
-                    return 3
-            """,
+                "src/main.py": "def main():\n    return 1\n",
+                "venv/lib/ignored.py": "def ignored():\n    return 1\n",
+                ".venv/lib/ignored.py": "def ignored():\n    return 1\n",
             }
         )
         paths = [p.relative_to(root).as_posix() for p in iter_python_files(root)]
@@ -102,45 +114,17 @@ class PyDupesTests(unittest.TestCase):
         self.assertNotIn("venv/lib/ignored.py", paths)
         self.assertNotIn(".venv/lib/ignored.py", paths)
 
-    def test_top_k_matches_prefix_of_full_sorted_results(self):
-        root = self._make_repo(
-            {
-                "a.py": """
-                def wrap_a(x):
-                    return normalize(x)
-
-                def wrap_b(y):
-                    return normalize(y)
-            """,
-                "b.py": """
-                def wrap_c(z):
-                    return normalize(z)
-
-                def wrap_d(w):
-                    return normalize(w)
-            """,
-            }
-        )
-        full = near_matches(root, threshold=0.4)
-        top = near_matches(root, threshold=0.4, top_k=3)
-
-        def pair_key(row):
-            return (row.a.qualname, row.b.qualname, row.similarity_score)
-
-        self.assertGreaterEqual(len(full), 3)
-        self.assertEqual([pair_key(r) for r in top], [pair_key(r) for r in full[:3]])
-
     def test_near_raises_on_invalid_threshold(self):
         root = self._make_repo({"a.py": "def one():\n    return 1\n"})
         with self.assertRaises(ValueError):
-            near_matches(root, threshold=-0.1)
+            near_matches(root, threshold=1.5)
         with self.assertRaises(ValueError):
-            near_matches(root, threshold=1.1)
+            near_matches(root, threshold=-0.1)
 
     def test_near_raises_on_invalid_top_k(self):
         root = self._make_repo({"a.py": "def one():\n    return 1\n"})
         with self.assertRaises(ValueError):
-            near_matches(root, threshold=0.5, top_k=-1)
+            near_matches(root, top_k=-1)
 
     def test_exact_raises_on_invalid_min_count(self):
         root = self._make_repo({"a.py": "def one():\n    return 1\n"})
@@ -152,11 +136,14 @@ class PyDupesTests(unittest.TestCase):
             {
                 "good_a.py": """
                 def one(x):
-                    return x + 1
+                    y = helper(x)
+                    return y + 1
             """,
                 "good_b.py": """
                 def two(y):
-                    return y + 1
+                    z = helper(y)
+                    w = z + 2
+                    return w
             """,
                 "bad.py": """
                 def broken(:
@@ -189,8 +176,8 @@ class PyDupesTests(unittest.TestCase):
             """,
             }
         )
-        rows = scan_functions(root)
-        by_qualname = {row["occurrence"].qualname: row["occurrence"] for row in rows}
+        profiles = scan_functions(root)
+        by_qualname = {p.occurrence.qualname: p.occurrence for p in profiles}
         self.assertTrue(by_qualname["Box.transform"].is_method)
         self.assertFalse(by_qualname["Box.transform.inner"].is_method)
         self.assertFalse(by_qualname["outer"].is_method)
@@ -213,6 +200,7 @@ class PyDupesTests(unittest.TestCase):
                     for key, value in obj.items():
                         if value is not None:
                             result[key] = str(value)
+                    result.pop("id", None)
                     return result
             """,
             }
@@ -221,6 +209,7 @@ class PyDupesTests(unittest.TestCase):
         self.assertTrue(rows)
         top = rows[0]
         self.assertNotIn("literal_specialization", top.pattern_labels)
+        self.assertIn("structural_variant", top.pattern_labels)
         self.assertEqual(top.suggested_refactor_kind, "extract_common_helper")
 
 

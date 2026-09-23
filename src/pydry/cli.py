@@ -6,12 +6,40 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ._version import __version__
 from .check import run_check
-from .config import CONFIG_FILENAME, ConfigError, apply_overrides, load_check_config
-from .engine import abstract_candidates, exact_groups, near_matches, to_jsonable
+from .config import (
+    CONFIG_FILENAME,
+    PROFILES,
+    ConfigError,
+    apply_overrides,
+    load_check_config,
+)
+from .engine import (
+    DEFAULT_BLOCK_MIN_STATEMENTS,
+    DEFAULT_MIN_STATEMENTS,
+    DEFAULT_THRESHOLD,
+    block_clones,
+    cluster_near_matches,
+    exact_groups,
+    near_matches,
+    scan_functions,
+    suppress_covered_blocks,
+    to_jsonable,
+)
+from .render import (
+    print_blocks,
+    print_diagnostics,
+    print_exact,
+    print_near,
+    print_showcase,
+)
 
 if TYPE_CHECKING:
-    from .models import ExactGroup, SimilarityResult
+    from collections.abc import Callable
+
+
+# ── JSON output ──────────────────────────────────────────────
 
 
 def _diagnostics_payload(
@@ -26,18 +54,6 @@ def _diagnostics_payload(
     }
 
 
-def _json_envelope(
-    payload: object,
-    *,
-    scan_errors: list[str],
-    plugin_errors: list[str],
-) -> dict[str, object]:
-    return {
-        "results": payload,
-        "diagnostics": _diagnostics_payload(scan_errors, plugin_errors),
-    }
-
-
 def _emit_json_output(
     payload: object,
     *,
@@ -45,11 +61,10 @@ def _emit_json_output(
     plugin_errors: list[str],
     output_path: str | None,
 ) -> None:
-    envelope = _json_envelope(
-        payload,
-        scan_errors=scan_errors,
-        plugin_errors=plugin_errors,
-    )
+    envelope = {
+        "results": payload,
+        "diagnostics": _diagnostics_payload(scan_errors, plugin_errors),
+    }
     rendered = json.dumps(envelope, indent=2)
     if output_path:
         out = Path(output_path)
@@ -60,12 +75,23 @@ def _emit_json_output(
     print(rendered)
 
 
-def _parse_min_count(value: str) -> int:
-    parsed = int(value)
-    if parsed < 2:
-        msg = "min-count must be >= 2"
-        raise argparse.ArgumentTypeError(msg)
-    return parsed
+# ── Argument parsing ─────────────────────────────────────────
+
+
+def _bounded_int(minimum: int, label: str) -> Callable[[str], int]:
+    def parse(value: str) -> int:
+        parsed = int(value)
+        if parsed < minimum:
+            msg = f"{label} must be >= {minimum}"
+            raise argparse.ArgumentTypeError(msg)
+        return parsed
+
+    return parse
+
+
+_parse_min_count = _bounded_int(2, "min-count")
+_parse_non_negative = _bounded_int(0, "value")
+_parse_block_size = _bounded_int(2, "block-min-statements")
 
 
 def _parse_threshold(value: str) -> float:
@@ -76,155 +102,172 @@ def _parse_threshold(value: str) -> float:
     return parsed
 
 
-def _parse_top_k(value: str) -> int:
-    parsed = int(value)
-    if parsed < 0:
-        msg = "top-k must be >= 0"
-        raise argparse.ArgumentTypeError(msg)
-    return parsed
-
-
-def _parse_non_negative(value: str) -> int:
-    parsed = int(value)
-    if parsed < 0:
-        msg = "value must be >= 0"
-        raise argparse.ArgumentTypeError(msg)
-    return parsed
-
-
 def _parse_optional_limit(value: str) -> int | str:
     if value.lower() == "none":
         return "none"
     return _parse_non_negative(value)
 
 
-def _add_json_output_arg(parser: argparse.ArgumentParser) -> None:
+def _add_scan_args(parser: argparse.ArgumentParser, *, defaults: bool = True) -> None:
+    """Options shared by every analysis command.
+
+    With ``defaults=False`` every option defaults to ``None`` so that the
+    check command can distinguish "not supplied" from an explicit value.
+    """
+
     parser.add_argument(
-        "--output",
-        help=("Write JSON output to a file path. Requires --format json."),
+        "--top-level-only",
+        action=argparse.BooleanOptionalAction,
+        default=False if defaults else None,
+        help="Ignore nested functions and methods.",
+    )
+    parser.add_argument(
+        "--strict",
+        action=argparse.BooleanOptionalAction,
+        default=False if defaults else None,
+        help="Fail on files that cannot be read or parsed.",
+    )
+    parser.add_argument(
+        "--min-statements",
+        type=_parse_non_negative,
+        default=DEFAULT_MIN_STATEMENTS if defaults else None,
+        help="Ignore functions with fewer statements than this.",
+    )
+    parser.add_argument(
+        "--ignore-trivial",
+        action=argparse.BooleanOptionalAction,
+        default=True if defaults else None,
+        help="Skip stubs, accessors, and call-free boilerplate.",
+    )
+    parser.add_argument(
+        "--exclude",
+        action="append",
+        default=[] if defaults else None,
+        metavar="GLOB",
+        help="Skip paths matching this glob, relative to root. Repeatable.",
     )
 
 
-def _validate_output_arg(
-    *,
-    output_path: str | None,
-    output_format: str,
-) -> bool:
+def _add_output_args(
+    parser: argparse.ArgumentParser, *, formats: tuple[str, ...]
+) -> None:
+    parser.add_argument("--format", choices=formats, default=formats[0])
+    parser.add_argument(
+        "--output",
+        help="Write JSON output to a file path. Requires --format json.",
+    )
+
+
+def _validate_output_arg(*, output_path: str | None, output_format: str) -> bool:
     if output_path and output_format != "json":
         print("Error: --output requires --format json.", file=sys.stderr)
         return False
     return True
 
 
-def _print_diagnostics(scan_errors: list[str], plugin_errors: list[str]) -> None:
-    if scan_errors:
-        print(
-            (
-                f"Warning: skipped {len(scan_errors)} file(s) due to parse/read errors."
-                " Use --strict to fail instead."
+def _add_normalization_args(
+    parser: argparse.ArgumentParser, *, default: bool | None
+) -> None:
+    parser.add_argument(
+        "--normalize-local-names",
+        action=argparse.BooleanOptionalAction,
+        default=default,
+        help="Treat local variable renames as equivalent.",
+    )
+    parser.add_argument(
+        "--normalize-constants",
+        action=argparse.BooleanOptionalAction,
+        default=default,
+        help="Treat literal value changes as equivalent.",
+    )
+
+
+def _add_showcase_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("root", nargs="?", default=".")
+    parser.add_argument("--threshold", type=_parse_threshold, default=DEFAULT_THRESHOLD)
+    parser.add_argument("--top-k", type=_parse_non_negative, default=5)
+    parser.add_argument(
+        "--block-min-statements",
+        type=_parse_block_size,
+        default=DEFAULT_BLOCK_MIN_STATEMENTS,
+    )
+    _add_scan_args(parser)
+    _add_output_args(parser, formats=("text", "json"))
+
+
+# ── Combined analysis ────────────────────────────────────────
+
+
+class _Analysis:
+    def __init__(
+        self,
+        *,
+        root: Path,
+        threshold: float,
+        top_k: int | None,
+        block_min_statements: int,
+        normalize_local_names: bool,
+        normalize_constants: bool,
+        args: argparse.Namespace,
+    ) -> None:
+        self.scan_errors: list[str] = []
+        self.plugin_errors: list[str] = []
+        profiles = scan_functions(
+            root,
+            top_level_only=args.top_level_only,
+            strict=args.strict,
+            scan_errors=self.scan_errors,
+            exclude=args.exclude,
+        )
+        common = {
+            "min_statements": args.min_statements,
+            "ignore_trivial": args.ignore_trivial,
+            "profiles": profiles,
+        }
+        self.exact_rows = exact_groups(
+            root,
+            normalize_local_names=normalize_local_names,
+            normalize_constants=normalize_constants,
+            **common,
+        )
+        self.near_rows = near_matches(
+            root,
+            threshold=threshold,
+            top_k=top_k,
+            plugin_errors=self.plugin_errors,
+            **common,
+        )
+        self.abstract_rows = [
+            row
+            for row in self.near_rows
+            if row.suggested_refactor_kind != "leave_separate"
+        ]
+        self.block_rows = suppress_covered_blocks(
+            block_clones(
+                root,
+                min_statements=block_min_statements,
+                near_threshold=threshold,
+                min_function_statements=args.min_statements,
+                ignore_trivial=args.ignore_trivial,
+                profiles=profiles,
             ),
-            file=sys.stderr,
+            self.near_rows,
         )
-        for msg in scan_errors[:5]:
-            print(f"  - {msg}", file=sys.stderr)
-        if len(scan_errors) > 5:
-            print(f"  ... {len(scan_errors) - 5} more", file=sys.stderr)
-
-    if plugin_errors:
-        unique_errors = list(dict.fromkeys(plugin_errors))
-        print(
-            (
-                f"Warning: {len(unique_errors)} plugin error(s) occurred."
-                " Plugin failures were isolated."
-            ),
-            file=sys.stderr,
-        )
-        for msg in unique_errors[:5]:
-            print(f"  - {msg}", file=sys.stderr)
-        if len(unique_errors) > 5:
-            print(f"  ... {len(unique_errors) - 5} more", file=sys.stderr)
 
 
-def _print_exact(groups: list[ExactGroup]) -> None:
-    if not groups:
-        print("No duplicate functions found.")
-        return
-    for i, g in enumerate(groups, start=1):
-        print(f"Group {i}: {g.count} occurrences  hash={g.hash[:12]}")
-        for occ in g.occurrences:
-            end = f"-{occ.end_lineno}" if occ.end_lineno else ""
-            print(f"  {occ.path}:{occ.lineno}{end}  {occ.kind} {occ.qualname}")
-        print()
-
-
-def _print_near(rows: list[SimilarityResult]) -> None:
-    if not rows:
-        print("No near matches found.")
-        return
-    for i, r in enumerate(rows, start=1):
-        print(
-            f"{i}. sim={r.similarity_score:.4f}"
-            f" refactor={r.refactorability_score:.4f}"
-            f"  {r.a.qualname}  <->  {r.b.qualname}"
-        )
-        print(f"   refactor: {r.suggested_refactor_kind}")
-        if r.pattern_labels:
-            print("   labels: " + ", ".join(r.pattern_labels))
-        if r.risk_flags:
-            print("   risks: " + ", ".join(r.risk_flags))
-        print(f"   shared: {r.shared_structure_summary}")
-        if r.key_differences:
-            print("   diffs: " + "; ".join(r.key_differences))
-        print()
-
-
-def _dedupe_messages(messages: list[str]) -> list[str]:
-    return list(dict.fromkeys(messages))
-
-
-def _showcase_pair_rows(
-    rows: list[SimilarityResult], *, top_k: int
-) -> list[dict[str, object]]:
-    out: list[dict[str, object]] = []
-    for row in rows[:top_k]:
-        out.append(
-            {
-                "similarity_score": row.similarity_score,
-                "refactorability_score": row.refactorability_score,
-                "a": row.a.qualname,
-                "b": row.b.qualname,
-                "suggested_refactor_kind": row.suggested_refactor_kind,
-                "pattern_labels": row.pattern_labels,
-                "risk_flags": row.risk_flags,
-            }
-        )
-    return out
-
-
-def _showcase_exact_rows(
-    groups: list[ExactGroup], *, top_k: int
-) -> list[dict[str, object]]:
-    out: list[dict[str, object]] = []
-    for group in groups[:top_k]:
-        out.append(
-            {
-                "count": group.count,
-                "hash_prefix": group.hash[:12],
-                "qualnames": [occ.qualname for occ in group.occurrences],
-            }
-        )
-    return out
+def _summary(analysis: _Analysis) -> dict[str, int]:
+    return {
+        "exact_group_count": len(analysis.exact_rows),
+        "near_count": len(analysis.near_rows),
+        "abstract_count": len(analysis.abstract_rows),
+        "block_clone_count": len(analysis.block_rows),
+    }
 
 
 def _showcase_payload(
-    *,
-    root: Path,
-    threshold: float,
-    top_k: int,
-    exact_rows: list[ExactGroup],
-    near_rows: list[SimilarityResult],
-    abstract_rows: list[SimilarityResult],
+    *, root: Path, threshold: float, top_k: int, analysis: _Analysis
 ) -> dict[str, Any]:
+    clusters = cluster_near_matches(analysis.near_rows)
     return {
         "root": str(root),
         "settings": {
@@ -235,15 +278,41 @@ def _showcase_payload(
                 "normalize_constants": True,
             },
         },
-        "summary": {
-            "exact_group_count": len(exact_rows),
-            "near_count": len(near_rows),
-            "abstract_count": len(abstract_rows),
-        },
+        "summary": _summary(analysis),
         "top_examples": {
-            "exact": _showcase_exact_rows(exact_rows, top_k=top_k),
-            "near": _showcase_pair_rows(near_rows, top_k=top_k),
-            "abstract": _showcase_pair_rows(abstract_rows, top_k=top_k),
+            "exact": [
+                {
+                    "count": g.count,
+                    "tier": g.tier,
+                    "stmt_count": g.stmt_count,
+                    "savings": g.savings,
+                    "hash_prefix": g.hash[:12],
+                    "qualnames": [occ.qualname for occ in g.occurrences],
+                }
+                for g in analysis.exact_rows[:top_k]
+            ],
+            "near": [
+                {
+                    "members": [occ.qualname for occ in c.members],
+                    "shared_statements": c.shared_statements,
+                    "savings": c.savings,
+                    "priority": c.priority,
+                    "suggested_refactor_kind": c.suggested_refactor_kind,
+                }
+                for c in clusters[:top_k]
+            ],
+            "blocks": [
+                {
+                    "stmt_count": g.stmt_count,
+                    "count": g.count,
+                    "savings": g.savings,
+                    "locations": [
+                        f"{occ.qualname}:{occ.lineno}-{occ.end_lineno}"
+                        for occ in g.occurrences
+                    ],
+                }
+                for g in analysis.block_rows[:top_k]
+            ],
         },
     }
 
@@ -255,186 +324,97 @@ def _report_payload(
     top_k: int | None,
     normalize_local_names: bool,
     normalize_constants: bool,
-    exact_rows: list[ExactGroup],
-    near_rows: list[SimilarityResult],
-    abstract_rows: list[SimilarityResult],
+    block_min_statements: int,
+    analysis: _Analysis,
 ) -> dict[str, Any]:
     return {
         "root": str(root),
         "settings": {
             "threshold": threshold,
             "top_k": top_k,
+            "block_min_statements": block_min_statements,
             "exact_normalization": {
                 "normalize_local_names": normalize_local_names,
                 "normalize_constants": normalize_constants,
             },
         },
-        "summary": {
-            "exact_group_count": len(exact_rows),
-            "near_count": len(near_rows),
-            "abstract_count": len(abstract_rows),
-        },
-        "exact": to_jsonable(exact_rows),
-        "near": to_jsonable(near_rows),
-        "abstract": to_jsonable(abstract_rows),
+        "summary": _summary(analysis),
+        "exact": to_jsonable(analysis.exact_rows),
+        "near": to_jsonable(analysis.near_rows),
+        "abstract": to_jsonable(analysis.abstract_rows),
+        "blocks": to_jsonable(analysis.block_rows),
     }
 
 
-def _print_showcase(payload: dict[str, Any]) -> None:
-    def _score_bar(score: float, *, width: int = 18) -> str:
-        clamped = max(0.0, min(1.0, score))
-        filled = round(clamped * width)
-        return "[" + ("#" * filled) + ("." * (width - filled)) + "]"
-
-    summary = payload["summary"]
-    top_examples = payload["top_examples"]
-    settings = payload["settings"]
-
-    print("=" * 72)
-    print("PYDRY SHOWCASE SIMULATION")
-    print("=" * 72)
-    print(f"Corpus: {payload['root']}")
-    print(
-        "Summary: "
-        f"exact_groups={summary['exact_group_count']} "
-        f"near_pairs={summary['near_count']} "
-        f"abstract_candidates={summary['abstract_count']}"
-    )
-    print(f"Config: threshold={settings['threshold']} top_k={settings['top_k']}")
-
-    print("\n[1/3] Exact duplicate discovery")
-    print(
-        "  command: pydry exact <corpus> --normalize-local-names --normalize-constants"
-    )
-    if top_examples["exact"]:
-        for i, group in enumerate(top_examples["exact"], start=1):
-            names = ", ".join(group["qualnames"])
-            print(f"  {i}. count={group['count']} hash={group['hash_prefix']} {names}")
-    else:
-        print("  none")
-
-    print("\n[2/3] Near-match ranking")
-    print(f"  command: pydry near <corpus> --threshold {settings['threshold']}")
-    if top_examples["near"]:
-        for i, row in enumerate(top_examples["near"], start=1):
-            sim_bar = _score_bar(row["similarity_score"])
-            ref_bar = _score_bar(row["refactorability_score"])
-            print(
-                f"  {i}. {row['a']} <-> {row['b']} ({row['suggested_refactor_kind']})"
-            )
-            print(f"     sim      {sim_bar} {row['similarity_score']:.4f}")
-            print(f"     refactor {ref_bar} {row['refactorability_score']:.4f}")
-            if row["pattern_labels"]:
-                print("     labels   " + ", ".join(row["pattern_labels"]))
-            if row["risk_flags"]:
-                print("     risks    " + ", ".join(row["risk_flags"]))
-    else:
-        print("  none")
-
-    print("\n[3/3] Abstraction candidates")
-    print(f"  command: pydry abstract <corpus> --threshold {settings['threshold']}")
-    if top_examples["abstract"]:
-        for i, row in enumerate(top_examples["abstract"], start=1):
-            sim_bar = _score_bar(row["similarity_score"])
-            ref_bar = _score_bar(row["refactorability_score"])
-            print(
-                f"  {i}. {row['a']} <-> {row['b']} ({row['suggested_refactor_kind']})"
-            )
-            print(f"     sim      {sim_bar} {row['similarity_score']:.4f}")
-            print(f"     refactor {ref_bar} {row['refactorability_score']:.4f}")
-            if row["pattern_labels"]:
-                print("     labels   " + ", ".join(row["pattern_labels"]))
-    else:
-        print("  none")
-
-    print("\nTip: rerun with --format json for machine-readable snapshots.")
+# ── Parser ───────────────────────────────────────────────────
 
 
-def _add_showcase_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("root", nargs="?", default=".")
-    parser.add_argument("--threshold", type=_parse_threshold, default=0.75)
-    parser.add_argument("--top-k", type=_parse_top_k, default=5)
-    parser.add_argument("--top-level-only", action="store_true")
-    parser.add_argument("--strict", action="store_true")
-    parser.add_argument("--format", choices=("text", "json"), default="text")
-    _add_json_output_arg(parser)
-
-
-def main(argv: list[str] | None = None) -> int:
-    argv = argv if argv is not None else sys.argv[1:]
+def _build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="pydry",
         description=(
             "AST-based duplicate and structural similarity detector for Python."
         ),
     )
+    ap.add_argument("--version", action="version", version=f"pydry {__version__}")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    p_exact = sub.add_parser(
-        "exact",
-        help="Find exact structural duplicates under configurable normalization.",
+    def analysis_parser(name: str, help_text: str) -> argparse.ArgumentParser:
+        parser = sub.add_parser(name, help=help_text)
+        parser.add_argument("root")
+        return parser
+
+    def finish(parser: argparse.ArgumentParser, *, formats: tuple[str, ...]) -> None:
+        _add_scan_args(parser)
+        _add_output_args(parser, formats=formats)
+
+    def add_threshold(parser: argparse.ArgumentParser, default: float) -> None:
+        parser.add_argument("--threshold", type=_parse_threshold, default=default)
+
+    def add_block_size(parser: argparse.ArgumentParser) -> None:
+        parser.add_argument(
+            "--block-min-statements",
+            type=_parse_block_size,
+            default=DEFAULT_BLOCK_MIN_STATEMENTS,
+            help="Minimum consecutive statements for a repeated block.",
+        )
+
+    p_exact = analysis_parser(
+        "exact", "Find whole functions that are duplicates under normalization."
     )
-    p_exact.add_argument("root")
     p_exact.add_argument("-n", "--min-count", type=_parse_min_count, default=2)
-    p_exact.add_argument("--top-level-only", action="store_true")
-    p_exact.add_argument("--normalize-local-names", action="store_true")
-    p_exact.add_argument("--normalize-constants", action="store_true")
+    _add_normalization_args(p_exact, default=True)
     p_exact.add_argument("--include-canonical", action="store_true")
-    p_exact.add_argument("--strict", action="store_true")
-    p_exact.add_argument("--format", choices=("text", "json"), default="text")
-    _add_json_output_arg(p_exact)
+    finish(p_exact, formats=("text", "json"))
 
-    p_near = sub.add_parser("near", help="Rank structurally similar functions.")
-    p_near.add_argument("root")
-    p_near.add_argument("--threshold", type=_parse_threshold, default=0.8)
-    p_near.add_argument("--top-k", type=_parse_top_k, default=None)
-    p_near.add_argument("--top-level-only", action="store_true")
-    p_near.add_argument("--strict", action="store_true")
-    p_near.add_argument("--format", choices=("text", "json"), default="text")
-    _add_json_output_arg(p_near)
+    p_near = analysis_parser("near", "Rank structurally similar functions.")
+    add_threshold(p_near, DEFAULT_THRESHOLD)
+    p_near.add_argument("--top-k", type=_parse_non_negative, default=None)
+    finish(p_near, formats=("text", "json"))
 
-    p_abs = sub.add_parser(
-        "abstract", help="Report likely abstraction/refactor candidates."
+    p_abs = analysis_parser("abstract", "Report near matches that look consolidatable.")
+    add_threshold(p_abs, 0.82)
+    p_abs.add_argument("--top-k", type=_parse_non_negative, default=None)
+    finish(p_abs, formats=("text", "json"))
+
+    p_blocks = analysis_parser(
+        "blocks", "Find runs of statements repeated inside larger functions."
     )
-    p_abs.add_argument("root")
-    p_abs.add_argument("--threshold", type=_parse_threshold, default=0.82)
-    p_abs.add_argument("--top-k", type=_parse_top_k, default=None)
-    p_abs.add_argument("--top-level-only", action="store_true")
-    p_abs.add_argument("--strict", action="store_true")
-    p_abs.add_argument("--format", choices=("text", "json"), default="text")
-    _add_json_output_arg(p_abs)
+    add_block_size(p_blocks)
+    finish(p_blocks, formats=("text", "json"))
 
-    p_report = sub.add_parser(
+    p_report = analysis_parser(
         "report",
-        help=(
-            "Generate a single machine-readable report combining exact, near, "
-            "and abstraction-candidate results."
-        ),
+        "Generate one JSON report with exact, block, near, and abstract results.",
     )
-    p_report.add_argument("root")
-    p_report.add_argument("--threshold", type=_parse_threshold, default=0.8)
-    p_report.add_argument("--top-k", type=_parse_top_k, default=200)
-    p_report.add_argument("--top-level-only", action="store_true")
-    p_report.add_argument("--strict", action="store_true")
-    p_report.set_defaults(normalize_local_names=True, normalize_constants=True)
-    p_report.add_argument(
-        "--no-normalize-local-names",
-        action="store_false",
-        dest="normalize_local_names",
-        help="Disable local-name normalization for exact-group analysis.",
-    )
-    p_report.add_argument(
-        "--no-normalize-constants",
-        action="store_false",
-        dest="normalize_constants",
-        help="Disable constant normalization for exact-group analysis.",
-    )
-    p_report.add_argument("--format", choices=("json",), default="json")
-    _add_json_output_arg(p_report)
+    add_threshold(p_report, DEFAULT_THRESHOLD)
+    p_report.add_argument("--top-k", type=_parse_non_negative, default=200)
+    add_block_size(p_report)
+    _add_normalization_args(p_report, default=True)
+    finish(p_report, formats=("json",))
 
     p_check = sub.add_parser(
-        "check",
-        help="Evaluate repository findings against a configurable CI policy.",
+        "check", help="Evaluate repository findings against a configurable CI policy."
     )
     p_check.add_argument("root", nargs="?", default=None)
     p_check.add_argument(
@@ -443,40 +423,36 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Read settings from this standalone pydry TOML file.",
     )
+    p_check.add_argument("--profile", choices=sorted(PROFILES), default=None)
     p_check.add_argument("--threshold", type=_parse_threshold, default=None)
-    p_check.add_argument("--top-k", type=_parse_top_k, default=None)
-    p_check.add_argument(
-        "--top-level-only", action=argparse.BooleanOptionalAction, default=None
-    )
-    p_check.add_argument(
-        "--strict", action=argparse.BooleanOptionalAction, default=None
-    )
-    p_check.add_argument(
-        "--normalize-local-names",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-    )
-    p_check.add_argument(
-        "--normalize-constants",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-    )
+    p_check.add_argument("--top-k", type=_parse_non_negative, default=None)
+    p_check.add_argument("--block-min-statements", type=_parse_block_size, default=None)
+    _add_normalization_args(p_check, default=None)
+    _add_scan_args(p_check, defaults=False)
     p_check.add_argument("--max-exact-groups", type=_parse_optional_limit, default=None)
+    p_check.add_argument("--max-block-clones", type=_parse_optional_limit, default=None)
     p_check.add_argument("--max-near-matches", type=_parse_optional_limit, default=None)
     p_check.add_argument(
         "--max-abstract-candidates", type=_parse_optional_limit, default=None
     )
     p_check.add_argument(
-        "--fail-on-scan-errors",
-        action=argparse.BooleanOptionalAction,
-        default=None,
+        "--fail-on-scan-errors", action=argparse.BooleanOptionalAction, default=None
     )
     p_check.add_argument(
-        "--fail-on-plugin-errors",
-        action=argparse.BooleanOptionalAction,
-        default=None,
+        "--fail-on-plugin-errors", action=argparse.BooleanOptionalAction, default=None
     )
     p_check.add_argument("--annotation-limit", type=_parse_non_negative, default=None)
+    p_check.add_argument(
+        "--baseline",
+        type=Path,
+        default=None,
+        help="Ignore findings recorded in this baseline file.",
+    )
+    p_check.add_argument(
+        "--update-baseline",
+        action="store_true",
+        help="Record the current findings as the accepted baseline and pass.",
+    )
     p_check.add_argument(
         "--output",
         type=Path,
@@ -490,263 +466,174 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     p_show = sub.add_parser(
-        "showcase",
-        help=(
-            "Run a compact summary over a corpus (defaults to the current directory)."
-        ),
+        "showcase", help="Print a compact summary of a corpus (default: current dir)."
     )
     _add_showcase_args(p_show)
-
-    p_sim = sub.add_parser(
-        "simulate",
-        help=(
-            "Run a visual terminal simulation of duplicate detection and "
-            "refactor-candidate ranking."
-        ),
-    )
+    p_sim = sub.add_parser("simulate", help="Alias for showcase.")
     _add_showcase_args(p_sim)
+    return ap
 
-    args = ap.parse_args(argv)
+
+# ── Entry point ──────────────────────────────────────────────
+
+
+def _run_check_command(args: argparse.Namespace) -> int:
+    try:
+        config = load_check_config(args.config)
+        config_path = args.config
+        if config_path is None and Path(CONFIG_FILENAME).is_file():
+            config_path = Path(CONFIG_FILENAME)
+        config = apply_overrides(
+            config,
+            root=args.root,
+            profile=args.profile,
+            threshold=args.threshold,
+            top_k=args.top_k,
+            top_level_only=args.top_level_only,
+            strict=args.strict,
+            normalize_local_names=args.normalize_local_names,
+            normalize_constants=args.normalize_constants,
+            min_statements=args.min_statements,
+            ignore_trivial=args.ignore_trivial,
+            block_min_statements=args.block_min_statements,
+            exclude=args.exclude,
+            baseline=str(args.baseline) if args.baseline is not None else None,
+            max_exact_groups=args.max_exact_groups,
+            max_block_clones=args.max_block_clones,
+            max_near_matches=args.max_near_matches,
+            max_abstract_candidates=args.max_abstract_candidates,
+            fail_on_scan_errors=args.fail_on_scan_errors,
+            fail_on_plugin_errors=args.fail_on_plugin_errors,
+            annotation_limit=args.annotation_limit,
+        )
+    except ConfigError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+    return run_check(
+        root=Path(config.root),
+        config=config,
+        output_path=args.output,
+        github=args.github,
+        config_path=config_path,
+        baseline_path=Path(config.baseline) if config.baseline else None,
+        update_baseline=args.update_baseline,
+    )
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = argv if argv is not None else sys.argv[1:]
+    args = _build_parser().parse_args(argv)
 
     if args.cmd == "check":
-        try:
-            config = load_check_config(args.config)
-            config_path = args.config
-            if config_path is None and Path(CONFIG_FILENAME).is_file():
-                config_path = Path(CONFIG_FILENAME)
-            config = apply_overrides(
-                config,
-                root=args.root,
-                threshold=args.threshold,
-                top_k=args.top_k,
-                top_level_only=args.top_level_only,
-                strict=args.strict,
-                normalize_local_names=args.normalize_local_names,
-                normalize_constants=args.normalize_constants,
-                max_exact_groups=args.max_exact_groups,
-                max_near_matches=args.max_near_matches,
-                max_abstract_candidates=args.max_abstract_candidates,
-                fail_on_scan_errors=args.fail_on_scan_errors,
-                fail_on_plugin_errors=args.fail_on_plugin_errors,
-                annotation_limit=args.annotation_limit,
-            )
-        except ConfigError as exc:
-            print(f"Error: {exc}", file=sys.stderr)
-            return 2
-        return run_check(
-            root=Path(config.root),
-            config=config,
-            output_path=args.output,
-            github=args.github,
-            config_path=config_path,
-        )
+        return _run_check_command(args)
 
     root = Path(args.root)
     if not root.exists() or not root.is_dir():
         print(f"Invalid directory: {root}", file=sys.stderr)
         return 2
+    if not _validate_output_arg(output_path=args.output, output_format=args.format):
+        return 2
 
     scan_errors: list[str] = []
     plugin_errors: list[str] = []
+    scan_kwargs = {
+        "top_level_only": args.top_level_only,
+        "strict": args.strict,
+        "scan_errors": scan_errors,
+        "min_statements": args.min_statements,
+        "ignore_trivial": args.ignore_trivial,
+        "exclude": args.exclude,
+    }
 
-    if args.cmd == "exact":
-        if not _validate_output_arg(output_path=args.output, output_format=args.format):
-            return 2
-        try:
-            exact_rows = exact_groups(
+    try:
+        if args.cmd == "exact":
+            payload: object = exact_groups(
                 root,
                 min_count=args.min_count,
-                top_level_only=args.top_level_only,
                 include_canonical=args.include_canonical,
                 normalize_local_names=args.normalize_local_names,
                 normalize_constants=args.normalize_constants,
-                strict=args.strict,
-                scan_errors=scan_errors,
+                **scan_kwargs,
             )
-        except (RuntimeError, ValueError) as exc:
-            print(f"Error: {exc}", file=sys.stderr)
-            return 2
-        _print_diagnostics(scan_errors, plugin_errors)
-        if args.format == "json":
-            _emit_json_output(
-                to_jsonable(exact_rows),
-                scan_errors=scan_errors,
-                plugin_errors=plugin_errors,
-                output_path=args.output,
-            )
-        else:
-            _print_exact(exact_rows)
-        return 0
-
-    if args.cmd == "near":
-        if not _validate_output_arg(output_path=args.output, output_format=args.format):
-            return 2
-        try:
-            near_rows = near_matches(
-                root,
-                threshold=args.threshold,
-                top_k=args.top_k,
-                top_level_only=args.top_level_only,
-                strict=args.strict,
-                scan_errors=scan_errors,
-                plugin_errors=plugin_errors,
-            )
-        except (RuntimeError, ValueError) as exc:
-            print(f"Error: {exc}", file=sys.stderr)
-            return 2
-        _print_diagnostics(scan_errors, plugin_errors)
-        if args.format == "json":
-            _emit_json_output(
-                to_jsonable(near_rows),
-                scan_errors=scan_errors,
-                plugin_errors=plugin_errors,
-                output_path=args.output,
-            )
-        else:
-            _print_near(near_rows)
-        return 0
-
-    if args.cmd == "abstract":
-        if not _validate_output_arg(output_path=args.output, output_format=args.format):
-            return 2
-        try:
-            abstract_rows = abstract_candidates(
-                root,
-                threshold=args.threshold,
-                top_k=args.top_k,
-                top_level_only=args.top_level_only,
-                strict=args.strict,
-                scan_errors=scan_errors,
-                plugin_errors=plugin_errors,
-            )
-        except (RuntimeError, ValueError) as exc:
-            print(f"Error: {exc}", file=sys.stderr)
-            return 2
-        _print_diagnostics(scan_errors, plugin_errors)
-        if args.format == "json":
-            _emit_json_output(
-                to_jsonable(abstract_rows),
-                scan_errors=scan_errors,
-                plugin_errors=plugin_errors,
-                output_path=args.output,
-            )
-        else:
-            _print_near(abstract_rows)
-        return 0
-
-    if args.cmd in {"showcase", "simulate"}:
-        if not _validate_output_arg(output_path=args.output, output_format=args.format):
-            return 2
-        exact_scan_errors: list[str] = []
-        near_scan_errors: list[str] = []
-        near_plugin_errors: list[str] = []
-        try:
-            exact_rows = exact_groups(
-                root,
-                min_count=2,
-                top_level_only=args.top_level_only,
-                include_canonical=False,
-                normalize_local_names=True,
-                normalize_constants=True,
-                strict=args.strict,
-                scan_errors=exact_scan_errors,
-            )
-            near_rows = near_matches(
+        elif args.cmd in {"near", "abstract"}:
+            rows = near_matches(
                 root,
                 threshold=args.threshold,
                 top_k=None,
+                plugin_errors=plugin_errors,
+                **scan_kwargs,
+            )
+            if args.cmd == "abstract":
+                rows = [
+                    r for r in rows if r.suggested_refactor_kind != "leave_separate"
+                ]
+            payload = rows[: args.top_k] if args.top_k is not None else rows
+        elif args.cmd == "blocks":
+            payload = block_clones(
+                root,
+                min_statements=args.block_min_statements,
+                min_function_statements=args.min_statements,
+                ignore_trivial=args.ignore_trivial,
                 top_level_only=args.top_level_only,
                 strict=args.strict,
-                scan_errors=near_scan_errors,
-                plugin_errors=near_plugin_errors,
-            )
-        except (RuntimeError, ValueError) as exc:
-            print(f"Error: {exc}", file=sys.stderr)
-            return 2
-
-        abstract_rows = [
-            row for row in near_rows if row.suggested_refactor_kind != "leave_separate"
-        ]
-        combined_scan_errors = _dedupe_messages([*exact_scan_errors, *near_scan_errors])
-        combined_plugin_errors = _dedupe_messages(near_plugin_errors)
-        _print_diagnostics(combined_scan_errors, combined_plugin_errors)
-
-        payload = _showcase_payload(
-            root=root,
-            threshold=args.threshold,
-            top_k=args.top_k,
-            exact_rows=exact_rows,
-            near_rows=near_rows,
-            abstract_rows=abstract_rows,
-        )
-        if args.format == "json":
-            _emit_json_output(
-                payload,
-                scan_errors=combined_scan_errors,
-                plugin_errors=combined_plugin_errors,
-                output_path=args.output,
+                scan_errors=scan_errors,
+                exclude=args.exclude,
             )
         else:
-            _print_showcase(payload)
-        return 0
-
-    if args.cmd == "report":
-        if not _validate_output_arg(output_path=args.output, output_format=args.format):
-            return 2
-        report_exact_scan_errors: list[str] = []
-        report_near_scan_errors: list[str] = []
-        report_near_plugin_errors: list[str] = []
-        try:
-            exact_rows = exact_groups(
-                root,
-                min_count=2,
-                top_level_only=args.top_level_only,
-                include_canonical=False,
-                normalize_local_names=args.normalize_local_names,
-                normalize_constants=args.normalize_constants,
-                strict=args.strict,
-                scan_errors=report_exact_scan_errors,
-            )
-            near_rows = near_matches(
-                root,
+            analysis = _Analysis(
+                root=root,
                 threshold=args.threshold,
-                top_k=args.top_k,
-                top_level_only=args.top_level_only,
-                strict=args.strict,
-                scan_errors=report_near_scan_errors,
-                plugin_errors=report_near_plugin_errors,
+                top_k=None,
+                block_min_statements=args.block_min_statements,
+                normalize_local_names=getattr(args, "normalize_local_names", True),
+                normalize_constants=getattr(args, "normalize_constants", True),
+                args=args,
             )
-        except (RuntimeError, ValueError) as exc:
-            print(f"Error: {exc}", file=sys.stderr)
-            return 2
+            scan_errors = analysis.scan_errors
+            plugin_errors = analysis.plugin_errors
+            if args.cmd == "report":
+                payload = _report_payload(
+                    root=root,
+                    threshold=args.threshold,
+                    top_k=args.top_k,
+                    normalize_local_names=args.normalize_local_names,
+                    normalize_constants=args.normalize_constants,
+                    block_min_statements=args.block_min_statements,
+                    analysis=analysis,
+                )
+                if args.top_k is not None:
+                    for key in ("near", "abstract", "blocks"):
+                        payload[key] = payload[key][: args.top_k]
+            else:
+                payload = _showcase_payload(
+                    root=root,
+                    threshold=args.threshold,
+                    top_k=args.top_k,
+                    analysis=analysis,
+                )
+    except (RuntimeError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
 
-        abstract_rows = [
-            row for row in near_rows if row.suggested_refactor_kind != "leave_separate"
-        ]
-        report_scan_errors = _dedupe_messages(
-            [*report_exact_scan_errors, *report_near_scan_errors]
-        )
-        report_plugin_errors = _dedupe_messages(report_near_plugin_errors)
-        _print_diagnostics(report_scan_errors, report_plugin_errors)
-        payload = _report_payload(
-            root=root,
-            threshold=args.threshold,
-            top_k=args.top_k,
-            normalize_local_names=args.normalize_local_names,
-            normalize_constants=args.normalize_constants,
-            exact_rows=exact_rows,
-            near_rows=near_rows,
-            abstract_rows=abstract_rows,
-        )
+    print_diagnostics(scan_errors, plugin_errors)
+    if args.format == "json":
         _emit_json_output(
-            payload,
-            scan_errors=report_scan_errors,
-            plugin_errors=report_plugin_errors,
+            to_jsonable(payload),
+            scan_errors=scan_errors,
+            plugin_errors=plugin_errors,
             output_path=args.output,
         )
         return 0
 
-    return 1
+    if args.cmd == "exact":
+        print_exact(payload)  # type: ignore[arg-type]
+    elif args.cmd in {"near", "abstract"}:
+        print_near(payload)  # type: ignore[arg-type]
+    elif args.cmd == "blocks":
+        print_blocks(payload)  # type: ignore[arg-type]
+    else:
+        print_showcase(payload)  # type: ignore[arg-type]
+    return 0
 
 
 if __name__ == "__main__":

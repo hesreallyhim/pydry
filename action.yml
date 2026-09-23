@@ -1,5 +1,5 @@
 name: pydry code-quality check
-description: Check Python code for duplicate and structurally similar functions.
+description: Check Python code for duplicate functions, repeated blocks, and structurally similar functions.
 author: Really Him
 
 branding:
@@ -21,11 +21,20 @@ inputs:
     description: Python version used to run pydry.
     required: false
     default: "3.11"
+  profile:
+    description: Policy profile (strict, balanced, or lenient); blank uses pydry.toml.
+    required: false
   threshold:
     description: Similarity threshold override; blank uses pydry.toml.
     required: false
   top-k:
     description: Report detail limit override; blank uses pydry.toml.
+    required: false
+  min-statements:
+    description: Minimum statements for a function to be analyzed; blank uses pydry.toml.
+    required: false
+  block-min-statements:
+    description: Minimum consecutive statements for a repeated block; blank uses pydry.toml.
     required: false
   top-level-only:
     description: Whether to ignore nested functions and methods; blank uses pydry.toml.
@@ -33,14 +42,26 @@ inputs:
   strict:
     description: Whether scan errors stop analysis; blank uses pydry.toml.
     required: false
+  ignore-trivial:
+    description: Whether stubs and accessors are skipped; blank uses pydry.toml.
+    required: false
   normalize-local-names:
     description: Whether local variable renames are normalized; blank uses pydry.toml.
     required: false
   normalize-constants:
     description: Whether literal value changes are normalized; blank uses pydry.toml.
     required: false
+  exclude:
+    description: Newline-separated glob patterns to skip, relative to root; blank uses pydry.toml.
+    required: false
+  baseline:
+    description: Path to a baseline file whose recorded findings are ignored; blank uses pydry.toml.
+    required: false
   max-exact-groups:
     description: Maximum exact groups or none; blank uses pydry.toml.
+    required: false
+  max-block-clones:
+    description: Maximum repeated blocks or none; blank uses pydry.toml.
     required: false
   max-near-matches:
     description: Maximum near matches or none; blank uses pydry.toml.
@@ -68,6 +89,9 @@ outputs:
   exact-groups:
     description: Number of exact-duplicate groups in the report.
     value: ${{ steps.check.outputs.exact-groups }}
+  block-clones:
+    description: Number of repeated blocks in the report.
+    value: ${{ steps.check.outputs.block-clones }}
   near-matches:
     description: Number of near matches in the report.
     value: ${{ steps.check.outputs.near-matches }}
@@ -94,13 +118,20 @@ runs:
         INPUT_ROOT: ${{ inputs.root }}
         INPUT_CONFIG: ${{ inputs.config }}
         INPUT_REPORT: ${{ inputs.report }}
+        INPUT_PROFILE: ${{ inputs.profile }}
         INPUT_THRESHOLD: ${{ inputs.threshold }}
         INPUT_TOP_K: ${{ inputs.top-k }}
+        INPUT_MIN_STATEMENTS: ${{ inputs.min-statements }}
+        INPUT_BLOCK_MIN_STATEMENTS: ${{ inputs.block-min-statements }}
         INPUT_TOP_LEVEL_ONLY: ${{ inputs.top-level-only }}
         INPUT_STRICT: ${{ inputs.strict }}
+        INPUT_IGNORE_TRIVIAL: ${{ inputs.ignore-trivial }}
         INPUT_NORMALIZE_LOCAL_NAMES: ${{ inputs.normalize-local-names }}
         INPUT_NORMALIZE_CONSTANTS: ${{ inputs.normalize-constants }}
+        INPUT_EXCLUDE: ${{ inputs.exclude }}
+        INPUT_BASELINE: ${{ inputs.baseline }}
         INPUT_MAX_EXACT_GROUPS: ${{ inputs.max-exact-groups }}
+        INPUT_MAX_BLOCK_CLONES: ${{ inputs.max-block-clones }}
         INPUT_MAX_NEAR_MATCHES: ${{ inputs.max-near-matches }}
         INPUT_MAX_ABSTRACT_CANDIDATES: ${{ inputs.max-abstract-candidates }}
         INPUT_FAIL_ON_SCAN_ERRORS: ${{ inputs.fail-on-scan-errors }}
@@ -148,13 +179,24 @@ runs:
           esac
         }
 
+        append_value "$INPUT_PROFILE" --profile
         append_value "$INPUT_THRESHOLD" --threshold
         append_value "$INPUT_TOP_K" --top-k
+        append_value "$INPUT_MIN_STATEMENTS" --min-statements
+        append_value "$INPUT_BLOCK_MIN_STATEMENTS" --block-min-statements
         append_boolean "$INPUT_TOP_LEVEL_ONLY" --top-level-only
         append_boolean "$INPUT_STRICT" --strict
+        append_boolean "$INPUT_IGNORE_TRIVIAL" --ignore-trivial
         append_boolean "$INPUT_NORMALIZE_LOCAL_NAMES" --normalize-local-names
         append_boolean "$INPUT_NORMALIZE_CONSTANTS" --normalize-constants
+        while IFS= read -r pattern; do
+          if [[ -n "$pattern" ]]; then
+            args+=(--exclude "$pattern")
+          fi
+        done <<< "$INPUT_EXCLUDE"
+        append_value "$INPUT_BASELINE" --baseline
         append_value "$INPUT_MAX_EXACT_GROUPS" --max-exact-groups
+        append_value "$INPUT_MAX_BLOCK_CLONES" --max-block-clones
         append_value "$INPUT_MAX_NEAR_MATCHES" --max-near-matches
         append_value "$INPUT_MAX_ABSTRACT_CANDIDATES" --max-abstract-candidates
         append_boolean "$INPUT_FAIL_ON_SCAN_ERRORS" --fail-on-scan-errors

@@ -10,14 +10,9 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from pydry.check import (
-    PolicyViolation,
-    _annotation,
-    _finding_annotations,
-    evaluate_policy,
-    run_check,
-)
+from pydry.check import PolicyViolation, evaluate_policy, run_check
 from pydry.config import CheckConfig
+from pydry.github import annotation, finding_annotations
 from pydry.models import ExactGroup, FunctionOccurrence
 
 
@@ -71,12 +66,12 @@ class CheckCommandTests(unittest.TestCase):
             {
                 "a.py": """
                 def first(value):
-                    result = value + 1
+                    result = normalize(value) + 1
                     return result
                 """,
                 "b.py": """
                 def second(item):
-                    output = item + 1
+                    output = normalize(item) + 1
                     return output
                 """,
             }
@@ -105,10 +100,12 @@ class CheckCommandTests(unittest.TestCase):
                 "config",
                 "settings",
                 "summary",
+                "baseline",
                 "check",
                 "exact",
                 "near",
                 "abstract",
+                "blocks",
             },
         )
         self.assertEqual(
@@ -118,12 +115,21 @@ class CheckCommandTests(unittest.TestCase):
         self.assertFalse(results["check"]["passed"])
         self.assertEqual(
             results["check"]["report_truncated"],
-            {"near": False, "abstract": False},
+            {"near": False, "abstract": False, "blocks": False},
         )
         self.assertEqual(results["summary"]["exact_group_count"], 1)
         self.assertEqual(
             set(results["exact"][0]),
-            {"hash", "count", "occurrences", "canonical"},
+            {
+                "hash",
+                "count",
+                "occurrences",
+                "tier",
+                "stmt_count",
+                "savings",
+                "canonical",
+                "baselined",
+            },
         )
         self.assertEqual(
             set(envelope["diagnostics"]),
@@ -265,7 +271,7 @@ class CheckCommandTests(unittest.TestCase):
         stdout = io.StringIO()
 
         with redirect_stdout(stdout):
-            _annotation(
+            annotation(
                 "error",
                 "bad%message\r\nnext",
                 occurrence,
@@ -297,7 +303,7 @@ class CheckCommandTests(unittest.TestCase):
         stdout = io.StringIO()
 
         with redirect_stdout(stdout):
-            emitted = _finding_annotations(
+            emitted = finding_annotations(
                 config=CheckConfig(annotation_limit=1),
                 violations=[violation],
                 exact_rows=[exact],
@@ -341,11 +347,12 @@ class CheckCommandTests(unittest.TestCase):
                 "exact-groups=0",
                 "near-matches=0",
                 "abstract-candidates=0",
+                "block-clones=0",
             ],
         )
         summary = step_summary.read_text(encoding="utf-8")
         self.assertIn("## pydry check: Passed", summary)
-        self.assertIn("| Exact duplicate groups | 0 | 0 |", summary)
+        self.assertIn("| Exact duplicate groups | 0 | 0 | 0 |", summary)
         self.assertIn(f"Report: `{report}`", summary)
         self.assertIn(
             f"pydry check {root} --config 'config/pydry policy.toml'",
@@ -392,3 +399,201 @@ class CheckCommandTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GitHubRenderingTests(unittest.TestCase):
+    """Annotations and the job summary for every finding category."""
+
+    def _make_repo(self) -> Path:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        loader = """
+        def load_{name}(path):
+            with open(path) as fh:
+                raw = fh.read()
+            rows = raw.splitlines()
+            out = []
+            for row in rows:
+                if not row.strip():
+                    continue
+                parts = row.split(",")
+                rec = {{"id": int(parts[0]), "name": parts[1].strip()}}
+                out.append(rec)
+            out.sort(key=lambda r: r["id"])
+            {tail}
+        """
+        (root / "a.py").write_text(
+            textwrap.dedent(loader.format(name="users", tail="return out")),
+            encoding="utf-8",
+        )
+        (root / "b.py").write_text(
+            textwrap.dedent(loader.format(name="orders", tail="return finish(out)")),
+            encoding="utf-8",
+        )
+        (root / "c.py").write_text(
+            textwrap.dedent(loader.format(name="items", tail="return out")),
+            encoding="utf-8",
+        )
+        (root / "d.py").write_text(
+            textwrap.dedent(
+                """
+                def pipeline(path):
+                    with open(path) as fh:
+                        raw = fh.read()
+                    rows = raw.splitlines()
+                    out = []
+                    for row in rows:
+                        if not row.strip():
+                            continue
+                        parts = row.split(",")
+                        rec = {"id": int(parts[0]), "name": parts[1].strip()}
+                        out.append(rec)
+                    out.sort(key=lambda r: r["id"])
+                    stats = {}
+                    for rec in out:
+                        stats[rec["id"]] = len(rec["name"])
+                    keys = sorted(stats)
+                    hist = {}
+                    for k in keys:
+                        hist[stats[k]] = hist.get(stats[k], 0) + 1
+                    report = []
+                    for k in keys:
+                        report.append(f"{k}: {stats[k]}")
+                    print("\\n".join(report))
+                    summary = {"count": len(out), "hist": hist}
+                    if summary["count"] == 0:
+                        summary["empty"] = True
+                    return summary
+                """
+            ),
+            encoding="utf-8",
+        )
+        return root
+
+    def test_every_category_annotates_and_summarizes(self) -> None:
+        root = self._make_repo()
+        report = root / "report.json"
+        github_output = root / "out.txt"
+        step_summary = root / "summary.md"
+        config = CheckConfig(
+            strict=False,
+            threshold=0.8,
+            max_exact_groups=0,
+            max_block_clones=0,
+            max_near_matches=0,
+            max_abstract_candidates=0,
+            exclude=("ignored",),
+            annotation_limit=50,
+        )
+        stdout = io.StringIO()
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "GITHUB_OUTPUT": str(github_output),
+                    "GITHUB_STEP_SUMMARY": str(step_summary),
+                },
+                clear=True,
+            ),
+            redirect_stdout(stdout),
+            redirect_stderr(io.StringIO()),
+        ):
+            code = run_check(
+                root=root,
+                config=config,
+                output_path=report,
+                github=True,
+                baseline_path=root / "absent.json",
+            )
+        self.assertEqual(code, 1)
+        out = stdout.getvalue()
+        self.assertIn("::error title=pydry,file=", out)
+        self.assertIn("Exact duplicate group (2 occurrences, identical)", out)
+        self.assertIn("Repeated block of", out)
+        self.assertIn("Near match: load_users and load_orders", out)
+        self.assertIn("Abstraction candidate: load_users and load_orders", out)
+        # Block annotations have no column; function annotations do.
+        block_lines = [line for line in out.splitlines() if "Repeated block" in line]
+        self.assertTrue(block_lines)
+        self.assertNotIn(",col=", block_lines[0])
+        self.assertIn("endLine=", block_lines[0])
+        summary = step_summary.read_text(encoding="utf-8")
+        self.assertIn("### Policy violations", summary)
+        self.assertIn("--exclude ignored", summary)
+        self.assertIn("| Repeated blocks | 1 | 1 | 0 |", summary)
+        self.assertIn("block-clones=1", github_output.read_text(encoding="utf-8"))
+
+    def test_summary_mentions_an_applied_baseline(self) -> None:
+        root = self._make_repo()
+        report = root / "report.json"
+        baseline = root / "baseline.json"
+        step_summary = root / "summary.md"
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            run_check(
+                root=root,
+                config=CheckConfig(strict=False),
+                output_path=report,
+                github=False,
+                baseline_path=baseline,
+                update_baseline=True,
+            )
+        with (
+            patch.dict(
+                os.environ, {"GITHUB_STEP_SUMMARY": str(step_summary)}, clear=True
+            ),
+            redirect_stdout(io.StringIO()),
+            redirect_stderr(io.StringIO()),
+        ):
+            code = run_check(
+                root=root,
+                config=CheckConfig(strict=False),
+                output_path=report,
+                github=True,
+                baseline_path=baseline,
+            )
+        self.assertEqual(code, 0)
+        summary = step_summary.read_text(encoding="utf-8")
+        self.assertIn(f"Baseline: `{baseline}`", summary)
+        self.assertIn(f"--baseline {baseline}", summary)
+
+    def test_analysis_failure_in_github_mode_emits_an_error_annotation(self) -> None:
+        root = self._make_repo()
+        (root / "broken.py").write_text("def broken(:\n", encoding="utf-8")
+        stdout = io.StringIO()
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            redirect_stdout(stdout),
+            redirect_stderr(io.StringIO()),
+        ):
+            code = run_check(
+                root=root,
+                config=CheckConfig(strict=True),
+                output_path=root / "report.json",
+                github=True,
+            )
+        self.assertEqual(code, 2)
+        self.assertIn("::error title=pydry analysis failed::", stdout.getvalue())
+
+    def test_lenient_scan_errors_become_warning_annotations(self) -> None:
+        root = self._make_repo()
+        (root / "broken.py").write_text("def broken(:\n", encoding="utf-8")
+        stdout = io.StringIO()
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            redirect_stdout(stdout),
+            redirect_stderr(io.StringIO()),
+        ):
+            code = run_check(
+                root=root,
+                config=CheckConfig(
+                    strict=False,
+                    fail_on_scan_errors=False,
+                    max_exact_groups=None,
+                    max_block_clones=None,
+                ),
+                output_path=root / "report.json",
+                github=True,
+            )
+        self.assertEqual(code, 0)
+        self.assertIn("::warning title=pydry scan error::", stdout.getvalue())

@@ -33,40 +33,55 @@ jobs:
 Project-wide settings live as top-level keys in a standalone `pydry.toml`:
 
 ```toml
-threshold = 0.85
-top_k = 100
-top_level_only = false
-strict = true
-normalize_local_names = true
-normalize_constants = false
+root = "src"
+profile = "balanced"
+exclude = ["tests", "**/generated_*.py"]
+baseline = ".pydry-baseline.json"
+
+threshold = 0.8
+min_statements = 2
+block_min_statements = 6
+ignore_trivial = true
 
 max_exact_groups = 0
+max_block_clones = 0
 max_near_matches = "none"
-max_abstract_candidates = 10
+max_abstract_candidates = "none"
 fail_on_scan_errors = true
 fail_on_plugin_errors = true
 annotation_limit = 25
 ```
 
-The `max_*` settings are policy ceilings. A result above a configured ceiling is a violation; use the string `"none"` to leave a category unenforced. The diagnostic settings determine whether scan or plugin errors also violate policy. `top_k` limits the detailed near-match and abstraction rows retained in the JSON report, but policy counts always evaluate every match. `annotation_limit` bounds the workflow commands emitted by pydry; GitHub may impose a lower display limit.
+The `max_*` settings are policy ceilings. A count above a configured ceiling is a violation; use the string `"none"` to leave a category unenforced. `profile` sets defaults for the sensitivity keys and the ceilings, and any key you write explicitly overrides the profile. `top_k` limits the detailed rows retained in the JSON report, but policy counts always evaluate every finding. `annotation_limit` bounds the workflow commands emitted by pydry; GitHub may impose a lower display limit.
 
-When a key is omitted, pydry uses these built-in defaults:
+When `baseline` names an existing file, findings recorded in it are excluded from the policy counts and marked `baselined` in the report. Generate the file locally with `pydry check --update-baseline` and commit it. Baselines use normalized content and record how many copies were accepted. An accepted finding reappears when another copy is added or an edit changes its normalized content; under the default normalization settings, renaming locals or changing literal values can leave the finding accepted.
+
+When a key is omitted, pydry uses these built-in defaults (the `balanced` profile):
 
 | Setting | Default |
 | --- | --- |
 | `root` | `.` |
+| `profile` | `balanced` |
 | `threshold` | `0.8` |
 | `top_k` | `200` |
+| `min_statements` | `2` |
+| `block_min_statements` | `6` |
+| `ignore_trivial` | `true` |
+| `exclude` | `[]` |
+| `baseline` | unset |
 | `top_level_only` | `false` |
 | `strict` | `true` |
 | `normalize_local_names` | `true` |
 | `normalize_constants` | `true` |
 | `max_exact_groups` | `0` |
+| `max_block_clones` | `0` |
 | `max_near_matches` | `"none"` |
-| `max_abstract_candidates` | `0` |
+| `max_abstract_candidates` | `"none"` |
 | `fail_on_scan_errors` | `true` |
 | `fail_on_plugin_errors` | `true` |
 | `annotation_limit` | `10` |
+
+The `strict` profile additionally enforces `max_abstract_candidates = 0` and lowers the block size to `5`. The `lenient` profile raises the threshold to `0.85`, `min_statements` to `4`, the block size to `8`, and leaves blocks unenforced.
 
 ## Override settings in a workflow
 
@@ -80,15 +95,19 @@ Every policy input is optional. A blank input defers to `pydry.toml`; a nonblank
     config: config/pydry.toml
     report: reports/pydry-report.json
     python-version: "3.12"
-    threshold: "0.88"
+    profile: strict
+    threshold: "0.85"
+    exclude: |
+      tests
+      **/generated_*.py
+    baseline: .pydry-baseline.json
     max-exact-groups: "0"
-    max-near-matches: "10"
+    max-block-clones: "0"
     max-abstract-candidates: "5"
-    fail-on-scan-errors: "true"
     annotation-limit: "20"
 ```
 
-Boolean overrides accept `true` or `false`. Leaving them blank preserves the project configuration.
+Boolean overrides accept `true` or `false`. Leaving them blank preserves the project configuration. `exclude` takes one glob per line.
 
 | Input | Default | Purpose |
 | --- | --- | --- |
@@ -96,20 +115,27 @@ Boolean overrides accept `true` or `false`. Leaving them blank preserves the pro
 | `config` | blank | Path to `pydry.toml`; blank discovers it in the workspace root |
 | `report` | `.pydry/pydry-report.json` | JSON report destination |
 | `python-version` | `3.11` | Python runtime for the action |
-| `threshold` | blank | Similarity threshold |
-| `top-k` | blank | Detailed near-match and abstraction rows retained in the report |
+| `profile` | blank | `strict`, `balanced`, or `lenient` |
+| `threshold` | blank | Near-match similarity threshold |
+| `top-k` | blank | Detailed rows retained in the report |
+| `min-statements` | blank | Minimum statements for a function to be analyzed |
+| `block-min-statements` | blank | Minimum consecutive statements for a repeated block |
 | `top-level-only` | blank | Ignore nested functions and methods |
 | `strict` | blank | Stop analysis on scan errors |
+| `ignore-trivial` | blank | Skip stubs, accessors, and call-free boilerplate |
 | `normalize-local-names` | blank | Normalize local variable names for exact matching |
 | `normalize-constants` | blank | Normalize literal values for exact matching |
+| `exclude` | blank | Newline-separated globs to skip, relative to root |
+| `baseline` | blank | Baseline file whose recorded findings are ignored |
 | `max-exact-groups` | blank | Exact-duplicate group ceiling, or `none` |
+| `max-block-clones` | blank | Repeated-block ceiling, or `none` |
 | `max-near-matches` | blank | Near-match ceiling, or `none` |
 | `max-abstract-candidates` | blank | Abstraction-candidate ceiling, or `none` |
 | `fail-on-scan-errors` | blank | Treat scan diagnostics as policy failures |
 | `fail-on-plugin-errors` | blank | Treat plugin diagnostics as policy failures |
 | `annotation-limit` | blank | Maximum annotations written to the job log |
 
-Paths and automatic configuration discovery are resolved from the current working directory—the checked-out repository workspace in the standard action setup. Discovery does not search parent directories or the positional scan root. Use `config`/`--config` when invoking pydry from another directory. pydry creates missing parent directories for a custom report path.
+Paths and automatic configuration discovery are resolved from the current working directory, which is the checked-out repository workspace in the standard action setup. Discovery does not search parent directories or the positional scan root. Use `config`/`--config` when invoking pydry from another directory. pydry creates missing parent directories for a custom report path.
 
 ## Outputs and exit status
 
@@ -120,8 +146,11 @@ The action exposes these string outputs:
 | `result` | `pass` or `fail` after analysis completes |
 | `report` | Path supplied through the `report` input |
 | `exact-groups` | Exact-duplicate group count |
+| `block-clones` | Repeated-block count |
 | `near-matches` | Near-match count |
 | `abstract-candidates` | Abstraction-candidate count |
+
+Counts are totals; when a baseline is applied, the job summary also shows how many findings are new.
 
 The underlying CLI contract is:
 

@@ -66,8 +66,8 @@ typecheck: $(INSTALL_STAMP) ## Run type checker
 	$(MYPY)
 
 .PHONY: test
-test: $(INSTALL_STAMP) ## Run tests
-	$(PYTEST)
+test: $(INSTALL_STAMP) ## Run tests and enforce the coverage floor
+	$(PYTEST) --cov --cov-report=
 
 .PHONY: coverage
 coverage: $(INSTALL_STAMP) ## Run tests with coverage report
@@ -85,6 +85,10 @@ demo-showcase: $(INSTALL_STAMP) ## Run a quick CLI showcase against ./demo
 demo-simulate: $(INSTALL_STAMP) ## Run a visual CLI simulation against ./demo
 	$(PYTHON) -m pydry simulate demo
 
+.PHONY: benchmark
+benchmark: $(INSTALL_STAMP) ## Measure finding counts on standard library packages
+	$(PYTHON) benchmarks/stdlib_noise.py
+
 .PHONY: check
 check: lint actionlint format-check typecheck test pydry-check ## Run all checks
 
@@ -101,7 +105,7 @@ check-dist: dist ## Validate built distributions for PyPI
 
 # ── Pre-commit ───────────────────────────────────────────────
 
-$(STAMPS)/pre-commit: .pre-commit-config.yaml $(STAMPS)/install | $(STAMPS)
+$(STAMPS)/pre-commit: .pre-commit-config.yaml $(INSTALL_STAMP) | $(STAMPS)
 	$(PRE_COMMIT) install
 	@touch $@
 
