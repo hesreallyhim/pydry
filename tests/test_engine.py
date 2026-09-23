@@ -820,6 +820,28 @@ class RemainingBranchTests(RepoMixin, unittest.TestCase):
         )
 
 
+class ClosureIdentityTests(RepoMixin, unittest.TestCase):
+    def test_closure_and_parameter_references_are_not_exact_duplicates(self) -> None:
+        root = self._make_repo(
+            {
+                "closures.py": """
+                def first(x):
+                    def inner(y):
+                        return x + y
+                    value = inner(1)
+                    return value
+
+                def second(x):
+                    def inner(y):
+                        return y + y
+                    value = inner(1)
+                    return value
+                """
+            }
+        )
+        self.assertEqual(exact_groups(root), [])
+
+
 class BlockLocationAndFilterTests(RepoMixin, unittest.TestCase):
     def test_blocks_starting_at_a_case_header_report_real_lines(self) -> None:
         body = """

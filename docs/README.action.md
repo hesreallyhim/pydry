@@ -54,7 +54,7 @@ annotation_limit = 25
 
 The `max_*` settings are policy ceilings. A count above a configured ceiling is a violation; use the string `"none"` to leave a category unenforced. `profile` sets defaults for the sensitivity keys and the ceilings, and any key you write explicitly overrides the profile. `top_k` limits the detailed rows retained in the JSON report, but policy counts always evaluate every finding. `annotation_limit` bounds the workflow commands emitted by pydry; GitHub may impose a lower display limit.
 
-When `baseline` names an existing file, findings recorded in it are excluded from the policy counts and marked `baselined` in the report. Generate the file locally with `pydry check --update-baseline` and commit it. Because baselines are keyed on the content of the duplicated code, an accepted finding reappears once either copy is edited.
+When `baseline` names an existing file, findings recorded in it are excluded from the policy counts and marked `baselined` in the report. Generate the file locally with `pydry check --update-baseline` and commit it. Baselines use normalized content and record how many copies were accepted. An accepted finding reappears when another copy is added or an edit changes its normalized content; under the default normalization settings, renaming locals or changing literal values can leave the finding accepted.
 
 When a key is omitted, pydry uses these built-in defaults (the `balanced` profile):
 

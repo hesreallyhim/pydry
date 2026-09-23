@@ -285,6 +285,149 @@ class ScopeAwareNormalizationTests(unittest.TestCase):
 
         return canonicalize(_parse_func(src), **opts)
 
+    def test_closure_reference_is_distinct_from_nested_parameter(self) -> None:
+        closure = (
+            "def first(x):\n"
+            "    def inner(y):\n"
+            "        return x + y\n"
+            "    value = inner(1)\n"
+            "    return value\n"
+        )
+        local = closure.replace("return x + y", "return y + y")
+        for normalize_locals in (False, True):
+            with self.subTest(normalize_locals=normalize_locals):
+                self.assertNotEqual(
+                    self._canonical(closure, normalize_local_names=normalize_locals),
+                    self._canonical(local, normalize_local_names=normalize_locals),
+                )
+
+    def test_renamed_closures_keep_equivalent_bindings(self) -> None:
+        first = (
+            "def first(x):\n"
+            "    def inner(y):\n"
+            "        return x + y\n"
+            "    value = inner(1)\n"
+            "    return value\n"
+        )
+        second = (
+            first.replace("first(x)", "second(outer)")
+            .replace("inner(y)", "inner(arg0)")
+            .replace("return x + y", "return outer + arg0")
+        )
+        for normalize_locals in (False, True):
+            with self.subTest(normalize_locals=normalize_locals):
+                self.assertEqual(
+                    self._canonical(first, normalize_local_names=normalize_locals),
+                    self._canonical(second, normalize_local_names=normalize_locals),
+                )
+
+    def test_nested_defaults_resolve_in_enclosing_scope(self) -> None:
+        for signature in ("y=x", "*, y=x"):
+            outer = (
+                "def first(x):\n"
+                f"    def inner({signature}):\n"
+                "        return y\n"
+                "    value = inner()\n"
+                "    return value\n"
+            )
+            external = outer.replace("y=x", "y=y")
+            renamed = outer.replace("first(x)", "first(other)").replace(
+                "y=x", "y=other"
+            )
+            for normalize_locals in (False, True):
+                with self.subTest(
+                    signature=signature, normalize_locals=normalize_locals
+                ):
+                    canonical = self._canonical(
+                        outer, normalize_local_names=normalize_locals
+                    )
+                    self.assertNotEqual(
+                        canonical,
+                        self._canonical(
+                            external, normalize_local_names=normalize_locals
+                        ),
+                    )
+                    self.assertEqual(
+                        canonical,
+                        self._canonical(
+                            renamed, normalize_local_names=normalize_locals
+                        ),
+                    )
+
+    def test_shadowed_nested_parameter_has_its_own_binding(self) -> None:
+        shadowed = (
+            "def first(x):\n"
+            "    def inner(x):\n"
+            "        return x + 1\n"
+            "    value = inner(2)\n"
+            "    return x + value\n"
+        )
+        renamed = shadowed.replace("inner(x)", "inner(y)").replace(
+            "return x + 1", "return y + 1"
+        )
+        for normalize_locals in (False, True):
+            with self.subTest(normalize_locals=normalize_locals):
+                self.assertEqual(
+                    self._canonical(shadowed, normalize_local_names=normalize_locals),
+                    self._canonical(renamed, normalize_local_names=normalize_locals),
+                )
+
+    def test_comprehension_first_iterable_uses_enclosing_scope(self) -> None:
+        for expression in (
+            "[x for x in x]",
+            "{x for x in x}",
+            "{x: x for x in x}",
+            "(x for x in x)",
+        ):
+            with self.subTest(expression=expression):
+                original = f"def f(x):\n    return {expression}\n"
+                renamed_expression = expression.replace("x", "item").replace(
+                    "in item", "in x"
+                )
+                renamed = f"def f(x):\n    return {renamed_expression}\n"
+                self.assertEqual(
+                    self._canonical(original, normalize_local_names=True),
+                    self._canonical(renamed, normalize_local_names=True),
+                )
+                external = original.replace("def f(x)", "def f(values)")
+                other_external = external.replace("in x", "in other")
+                self.assertNotEqual(
+                    self._canonical(external, normalize_local_names=True),
+                    self._canonical(other_external, normalize_local_names=True),
+                )
+
+    def test_method_closure_lookup_skips_class_bindings(self) -> None:
+        closure = (
+            "def f(x):\n"
+            "    class C:\n"
+            "        x = 1\n"
+            "        def method(self):\n"
+            "            return x\n"
+            "    return C\n"
+        )
+        external = closure.replace("x = 1", "y = 1").replace("return x", "return y")
+        self.assertNotEqual(
+            self._canonical(closure, normalize_local_names=True),
+            self._canonical(external, normalize_local_names=True),
+        )
+
+    def test_method_defaults_can_reference_class_bindings(self) -> None:
+        class_default = (
+            "def f(x):\n"
+            "    class C:\n"
+            "        x = 1\n"
+            "        def method(self, value=x):\n"
+            "            return value\n"
+            "    return C\n"
+        )
+        renamed_default = class_default.replace("x = 1", "y = 1").replace(
+            "value=x", "value=y"
+        )
+        self.assertEqual(
+            self._canonical(class_default, normalize_local_names=True),
+            self._canonical(renamed_default, normalize_local_names=True),
+        )
+
     def test_parameter_named_like_a_placeholder_still_matches(self) -> None:
         first = "def first(value):\n    output = transform(value)\n    return output\n"
         for name in ("arg0", "vararg", "kwarg", "v0"):

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import keyword
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -96,14 +97,26 @@ def _comprehension_targets(node: ast.AST) -> frozenset[str]:
     return frozenset(names)
 
 
-def _parameter_names(node: _FuncNode | ast.Lambda) -> frozenset[str]:
-    args = node.args
+def _parameters(args: ast.arguments) -> list[ast.arg]:
     params = [*args.posonlyargs, *args.args, *args.kwonlyargs]
     if args.vararg:
         params.append(args.vararg)
     if args.kwarg:
         params.append(args.kwarg)
-    return frozenset(param.arg for param in params)
+    return params
+
+
+def _parameter_names(node: _FuncNode | ast.Lambda) -> frozenset[str]:
+    return frozenset(param.arg for param in _parameters(node.args))
+
+
+@dataclass
+class _NameScope:
+    bound: frozenset[str]
+    renamed: frozenset[str]
+    names: dict[str, str] = field(default_factory=dict)
+    globals: frozenset[str] = frozenset()
+    is_class: bool = False
 
 
 class LocalNameNormalizer(ast.NodeTransformer):
@@ -114,8 +127,8 @@ class LocalNameNormalizer(ast.NodeTransformer):
     names, and builtins are kept, so functions that call different helpers
     do not become equivalent. Without ``bound`` every non-keyword name is
     renamed. Names bound in a nested scope shadow outer bindings; with
-    ``rename_nested`` false they are left alone, which is how parameter-only
-    renaming avoids touching locals of nested functions or lambdas.
+    ``rename_nested`` false, only named-function parameters are renamed in
+    nested scopes; other locals and lambda parameters are left alone.
     Placeholders use characters that cannot appear in identifiers, so a
     source name such as ``arg0`` or ``v0`` can never collide with them.
     """
@@ -133,42 +146,41 @@ class LocalNameNormalizer(ast.NodeTransformer):
         self.prefix = prefix
         self.unrestricted = bound is None
         self.rename_nested = rename_nested
-        # Innermost scope last. Each entry records whether names bound in
-        # that scope are renamed or merely shadow outer bindings.
-        self.scopes: list[tuple[frozenset[str], bool]] = (
-            [(bound, True)] if bound is not None else []
-        )
+        # A spelling can denote different bindings in different scopes.
+        # Maps are scoped; the counter is shared for the entire traversal.
+        self.scopes = [_NameScope(bound, bound)] if bound is not None else []
 
     def _preserve(self, name: str) -> bool:
         if keyword.iskeyword(name) or name in _PRESERVED or is_placeholder(name):
             return True
         if self.preserve_self_cls and name in {"self", "cls"}:
             return True
-        if self.unrestricted:
-            return False
-        for names, renamable in reversed(self.scopes):
-            if name in names:
-                return not renamable
-        return True
+        for scope in reversed(self.scopes):
+            if scope.is_class and scope is not self.scopes[-1]:
+                continue
+            if name in scope.globals:
+                return True
+            if name in scope.bound:
+                return name not in scope.renamed
+        return not self.unrestricted
 
     def _tok(self, name: str) -> str:
-        if name not in self.name_map:
-            self.name_map[name] = placeholder(self.prefix, self.counter)
+        mapping = self.name_map
+        for scope in reversed(self.scopes):
+            if scope.is_class and scope is not self.scopes[-1]:
+                continue
+            if name in scope.bound:
+                mapping = scope.names
+                break
+        if name not in mapping:
+            mapping[name] = placeholder(self.prefix, self.counter)
             self.counter += 1
-        return self.name_map[name]
+        return mapping[name]
 
     def _rename(self, name: str | None) -> str | None:
         if name and not self._preserve(name):
             return self._tok(name)
         return name
-
-    def _scoped(self, node: ast.AST, names: frozenset[str]) -> ast.AST:
-        self.scopes.append((names, self.rename_nested))
-        try:
-            self.generic_visit(node)
-        finally:
-            self.scopes.pop()
-        return node
 
     def visit_Name(self, node: ast.Name) -> ast.Name:
         if self._preserve(node.id):
@@ -176,7 +188,6 @@ class LocalNameNormalizer(ast.NodeTransformer):
         return ast.copy_location(ast.Name(id=self._tok(node.id), ctx=node.ctx), node)
 
     def visit_arg(self, node: ast.arg) -> ast.arg:
-        self.generic_visit(node)
         node.arg = self._rename(node.arg) or node.arg
         return node
 
@@ -199,40 +210,117 @@ class LocalNameNormalizer(ast.NodeTransformer):
     def visit_MatchMapping(self, node: ast.MatchMapping) -> ast.AST:
         return self._rename_field(node, "rest")
 
+    def _visit_defaults(self, args: ast.arguments) -> None:
+        # Defaults and annotations evaluate outside the function's scope.
+        args.defaults = [self.visit(default) for default in args.defaults]
+        args.kw_defaults = [
+            self.visit(default) if default is not None else None
+            for default in args.kw_defaults
+        ]
+        for arg in _parameters(args):
+            if arg.annotation is not None:
+                arg.annotation = self.visit(arg.annotation)
+
+    def _visit_parameters(self, args: ast.arguments) -> None:
+        for arg in _parameters(args):
+            self.visit_arg(arg)
+
     def visit_Lambda(self, node: ast.Lambda) -> ast.AST:
-        return self._scoped(node, _parameter_names(node))
+        self._visit_defaults(node.args)
+        names = bound_names(node)
+        renamed = names if self.rename_nested else frozenset()
+        self.scopes.append(_NameScope(names, renamed))
+        try:
+            self._visit_parameters(node.args)
+            node.body = self.visit(node.body)
+        finally:
+            self.scopes.pop()
+        return node
 
     def visit_ListComp(self, node: ast.ListComp) -> ast.AST:
-        return self._scoped(node, _comprehension_targets(node))
+        return self._comprehension_scope(node)
 
     def visit_SetComp(self, node: ast.SetComp) -> ast.AST:
-        return self._scoped(node, _comprehension_targets(node))
+        return self._comprehension_scope(node)
 
     def visit_DictComp(self, node: ast.DictComp) -> ast.AST:
-        return self._scoped(node, _comprehension_targets(node))
+        return self._comprehension_scope(node)
 
     def visit_GeneratorExp(self, node: ast.GeneratorExp) -> ast.AST:
-        return self._scoped(node, _comprehension_targets(node))
+        return self._comprehension_scope(node)
+
+    def _comprehension_scope(
+        self, node: ast.ListComp | ast.SetComp | ast.DictComp | ast.GeneratorExp
+    ) -> ast.AST:
+        # Only the first iterable is evaluated outside the comprehension.
+        first = node.generators[0]
+        first.iter = self.visit(first.iter)
+        names = _comprehension_targets(node)
+        renamed = names if self.rename_nested else frozenset()
+        self.scopes.append(_NameScope(names, renamed))
+        try:
+            for generator in node.generators:
+                if generator is not first:
+                    generator.iter = self.visit(generator.iter)
+                generator.target = self.visit(generator.target)
+                generator.ifs = [self.visit(item) for item in generator.ifs]
+            if isinstance(node, ast.DictComp):
+                node.key = self.visit(node.key)
+                node.value = self.visit(node.value)
+            else:
+                node.elt = self.visit(node.elt)
+        finally:
+            self.scopes.pop()
+        return node
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.AST:
-        return self._nested_scope(node)
+        return self._function_scope(node)
 
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> ast.AST:
-        return self._nested_scope(node)
+        return self._function_scope(node)
 
     def visit_ClassDef(self, node: ast.ClassDef) -> ast.AST:
-        return self._nested_scope(node)
-
-    def _nested_scope(
-        self, node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef
-    ) -> ast.AST:
         node.name = self._rename(node.name) or node.name
-        return self._scoped(node, bound_names(node))
+        node.bases = [self.visit(base) for base in node.bases]
+        node.keywords = [self.visit(item) for item in node.keywords]
+        node.decorator_list = [self.visit(item) for item in node.decorator_list]
+        names = bound_names(node)
+        renamed = names if self.rename_nested else frozenset()
+        self.scopes.append(_NameScope(names, renamed, is_class=True))
+        try:
+            node.body = [self.visit(statement) for statement in node.body]
+        finally:
+            self.scopes.pop()
+        return node
+
+    def _function_scope(self, node: _FuncNode) -> ast.AST:
+        node.name = self._rename(node.name) or node.name
+        self._visit_defaults(node.args)
+        node.decorator_list = [self.visit(item) for item in node.decorator_list]
+        if node.returns is not None:
+            node.returns = self.visit(node.returns)
+        names = bound_names(node)
+        renamed = names if self.rename_nested else _parameter_names(node)
+        globals_ = frozenset(
+            name
+            for child in iter_scope(node)
+            if isinstance(child, ast.Global)
+            for name in child.names
+        )
+        self.scopes.append(_NameScope(names, renamed, globals=globals_))
+        try:
+            self._visit_parameters(node.args)
+            node.body = [self.visit(statement) for statement in node.body]
+        finally:
+            self.scopes.pop()
+        return node
 
     def visit_Global(self, node: ast.Global) -> ast.Global:  # preserve semantics
         return node
 
-    def visit_Nonlocal(self, node: ast.Nonlocal) -> ast.Nonlocal:  # preserve semantics
+    def visit_Nonlocal(self, node: ast.Nonlocal) -> ast.Nonlocal:
+        if self.scopes:
+            node.names = [self._rename(name) or name for name in node.names]
         return node
 
 
@@ -276,6 +364,7 @@ class FunctionNormalizer(ast.NodeTransformer):
         self.normalize_local_names = normalize_local_names
         self.normalize_constants = normalize_constants
         self.preserve_function_name = preserve_function_name
+        self._depth = 0
 
     def visit_FunctionDef(
         self, node: ast.FunctionDef
@@ -290,9 +379,11 @@ class FunctionNormalizer(ast.NodeTransformer):
     def _normalize(
         self, node: ast.FunctionDef | ast.AsyncFunctionDef
     ) -> ast.FunctionDef | ast.AsyncFunctionDef:
-        bound = bound_names(node)
-        params = _parameter_names(node)
-        node = self.generic_visit(node)  # type: ignore[assignment]
+        self._depth += 1
+        try:
+            node = self.generic_visit(node)  # type: ignore[assignment]
+        finally:
+            self._depth -= 1
 
         if self.strip_docstrings and node.body:
             first = node.body[0]
@@ -302,9 +393,6 @@ class FunctionNormalizer(ast.NodeTransformer):
                 and isinstance(first.value.value, str)
             ):
                 node.body = node.body[1:]
-
-        if not self.preserve_function_name:
-            node.name = "__func__"
 
         if self.strip_decorators:
             node.decorator_list = []
@@ -317,14 +405,19 @@ class FunctionNormalizer(ast.NodeTransformer):
                     arg.annotation = None
                     arg.type_comment = None
 
-        # Parameters and their references are renamed through one mapping so
-        # that a parameter's name never matters, at either tier.
-        if self.normalize_local_names:
-            LocalNameNormalizer(bound=bound).generic_visit(node)
-        elif self.normalize_arg_names:
-            LocalNameNormalizer(
-                bound=params, prefix="arg", rename_nested=False
-            ).generic_visit(node)
+        # Normalize the whole tree once: closure references and nested
+        # parameters must share a traversal, not independent placeholder maps.
+        if self._depth == 0:
+            if self.normalize_local_names or self.normalize_arg_names:
+                LocalNameNormalizer(
+                    bound=frozenset(),
+                    prefix="v" if self.normalize_local_names else "arg",
+                    rename_nested=self.normalize_local_names,
+                ).visit(node)
+            if not self.preserve_function_name:
+                for child in ast.walk(node):
+                    if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        child.name = "__func__"
 
         if self.normalize_constants:
             node = ConstantNormalizer().visit(node)
